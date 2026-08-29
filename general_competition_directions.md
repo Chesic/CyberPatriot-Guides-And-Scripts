@@ -103,11 +103,14 @@ will lose you points.
 
 
 # Preparation
-1. Learning your system and how to navigate it.
-2. Learning what gives you points and what doesn't give you points
-3. Knowing what will lose you points.
-4. Team roles and jobs.
-5. Automation
+1. Learning your system and how to navigate it, this is basic specialization and can help with team roles. 
+2. Learning what gives you points and what doesn't give you points can help you manage your time better to 
+optimize how to gain points during the competition. 
+3. Knowing what will lose you points and what won't lose you points is very important. Of course losing
+points is bad and can be the difference maker at the end of the competition. 
+4. Creating roles and jobs for your team is very important, see teamwork for more information.
+5. Automation, creating bash scripts and ways to help automate your process/jobs can get the teadious 
+system hardening tasks out of the way quicker. 
 
 # During the Competition
 
