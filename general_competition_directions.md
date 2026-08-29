@@ -96,8 +96,10 @@ operating system.
 Of course, both of these team can be configured differently but this is how I would do it. 
 
 # The use of AI 
-1. It isn't always correct. 
+1. AI is not always correct, and can hallucinate and produce incorrect commands or answers that 
+will lose you points. 
 2. Don't run a command without looking over the code that it has given to you. 
+3. Relying entirely on AI can result in lazy or incorrect practices that will not help you in the field. 
 
 
 # Preparation
@@ -110,9 +112,6 @@ Of course, both of these team can be configured differently but this is how I wo
 # During the Competition
 
 Systems:
-0. Time management should be prioritized very highly during this competition. If a task is taking to long move 
-on to another if you are able to do so. Spending to much time on an individual task can lose you time to complete 
-others. 
 1. As the competition suggests you should complete your forensic questions first. But if you are unable to do so, 
 or they are taking a long time to complete. Secure the system without interfering with the forensic questions. 
 2. Once you have completed the forensic questions. Begin securing the system how the 'company' has asked you to 
@@ -120,9 +119,13 @@ inside of their briefing they have given to you.
 3. Move on to more advanced hardening after you have completed tasks 1 and 2.  
 
 Quizzes/Packet Tracer:
+1. These should be finished at a pace that maximizes points while allowing you to have to after completion to 
+help teammates with other tasks. 
 
 General: 
-
+1. Time management should be prioritized very highly during this competition. If a task is taking to long move 
+on to another if you are able to do so. Spending to much time on an individual task can lose you time to complete 
+others. 
 
 
 # Other System Hardening References
