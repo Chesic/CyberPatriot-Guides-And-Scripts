@@ -1,15 +1,17 @@
 # Manual Hardening Reference
 
-These are checklist items you're handling by hand rather than through
-`cyberPatriot_Script.sh`. Each section has a quick explanation and
-copy-pasteable commands to run yourself (as root / with `sudo`).
+Copy-pasteable commands (run as root / with `sudo`) for doing checklist
+items by hand. Most of these are also menu options in the interactive
+`cyberPatriot_Script.sh` (users, services report, sysctl, cron, auditd,
+ClamAV/chkrootkit); use this page when you want to do a step yourself or
+need something the script leaves to you, like cron/at allow-lists or
+disabling a specific service.
 
 ## User Account Management
 
-`cyberPatriot_Script.sh` only *reports* on accounts (UID 0 accounts,
-accounts with empty passwords) - it does not lock, unlock, or delete
-anything. Use these commands to act on what it flags, once you've
-confirmed which accounts are actually unauthorized.
+The script's User Management option (2) lets you choose keep / admin /
+standard / delete for each user. These are the equivalent commands if
+you'd rather do it by hand.
 
 ```bash
 # List all local accounts with UID and shell (spot anything unexpected)
