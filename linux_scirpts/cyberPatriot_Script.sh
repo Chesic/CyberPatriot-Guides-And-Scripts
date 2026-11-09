@@ -10,13 +10,13 @@ set -uo pipefail
 ### Setup ###
 
 LOG_FILE="./cyberpatriot_hardening.log"
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-LISTS_FILE="${SCRIPT_DIR}/cyberpatriot_lists.conf"
 ADMIN_GROUPS="sudo|admin|wheel"
 SEARCH_DIRS=(/home /root /tmp /srv /opt /media /mnt /var/www)
 WEAK_PASSWORDS=(password Password Password1 password1 password123 123456 12345678 123456789
     qwerty abc123 letmein admin changeme welcome iloveyou P@ssw0rd Passw0rd monkey dragon
     football 111111 000000 root toor)
+MEDIA_EXTS=(mp3 mp4 wav flac avi mkv mov ogg m4a wma aac webm mpg mpeg)
+GAME_KEYWORDS="aisleriot|gnome-mines|gnome-sudoku|gnome-mahjongg|gnome-chess|gnome-robots|gnome-nibbles|gnome-tetravex|gnome-klotski|four-in-a-row|iagno|quadrapassel|hitori|lightsoff|swell-foop|tali|five-or-more|freeciv|supertux|minetest|wesnoth|steam|openttd|0ad|pingus|frozen-bubble|nethack|bsdgames|pacman|kpat|kmines|ksudoku|xboard|gnuchess|freecol|extremetuxracer|chromium-bsu|neverball|armagetron|openarena|warzone2100|lutris|playonlinux|minecraft|solitaire|tetris|doom"
 SESSION_START=0
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -155,228 +155,47 @@ set_pam_option() {
     fi
 }
 
-### Editable Lists ###
+### Keep Decisions ###
 
-LIST_NAMES=(critical_services required_software authorized_admins authorized_users
-    prohibited_services prohibited_software game_keywords media_types)
-declare -A LIST_LABELS=(
-    [critical_services]="Critical services (README)"
-    [required_software]="Required software (README)"
-    [authorized_admins]="Authorized administrators (README)"
-    [authorized_users]="Authorized standard users (README)"
-    [prohibited_services]="Services offered for disabling"
-    [prohibited_software]="Packages offered for removal"
-    [game_keywords]="Game name keywords"
-    [media_types]="Media file extensions"
-)
-declare -A LISTS=()
+# Things answered "keep" this run, so later checks and functions leave them alone.
+declare -A KEPT=()
 
-default_list() {
-    case "$1" in
-        prohibited_services)
-            echo "nginx apache2 squid dovecot smbd nmbd vsftpd pure-ftpd proftpd tftpd-hpa atftpd
-                inetd xinetd telnet snmpd nfs-server nfs-kernel-server rpcbind bind9 named
-                postfix sendmail exim4 cups avahi-daemon x11vnc vncserver mysql mariadb
-                postgresql openvpn rsync" ;;
-        prohibited_software)
-            echo "john john-data hydra hydra-gtk nmap zenmap wireshark wireshark-qt wireshark-common
-                tshark netcat netcat-traditional netcat-openbsd ncat aircrack-ng ophcrack ophcrack-cli
-                ettercap-common ettercap-graphical kismet nikto sqlmap medusa fcrackzip hashcat doona
-                xprobe xprobe2 nginx nginx-core apache2 squid dovecot-core dovecot-imapd dovecot-pop3d
-                samba bind9 vsftpd pure-ftpd proftpd-basic proftpd-core tftpd atftpd tftpd-hpa x11vnc
-                tightvncserver tigervnc-standalone-server vnc4server snmp snmpd nfs-kernel-server
-                rpcbind sendmail sendmail-bin postfix xinetd telnetd telnet inetutils-telnetd
-                rsh-server rsh-client nis deluge transmission-gtk transmission-daemon qbittorrent" ;;
-        game_keywords)
-            echo "aisleriot gnome-mines gnome-sudoku gnome-mahjongg gnome-chess gnome-robots
-                gnome-nibbles gnome-tetravex gnome-klotski four-in-a-row iagno quadrapassel hitori
-                lightsoff swell-foop tali five-or-more freeciv supertux minetest wesnoth steam
-                openttd 0ad pingus frozen-bubble nethack bsdgames pacman kpat kmines ksudoku xboard
-                gnuchess freecol extremetuxracer chromium-bsu neverball armagetron openarena
-                warzone2100 lutris playonlinux minecraft solitaire tetris doom" ;;
-        media_types)
-            echo "mp3 mp4 wav flac avi mkv mov ogg m4a wma aac webm mpg mpeg" ;;
-    esac | tr -s ' \n' '\n\n' | grep .
-}
-
-list_items() {
-    [[ -n "${LISTS[$1]:-}" ]] && printf '%s\n' "${LISTS[$1]}"
-}
-
-list_has() {
-    list_items "$1" | grep -qixF -- "$2"
-}
-
-# Regex like "^(a|b|c)" from a list, or one that never matches if the list is empty.
-list_regex() {
-    local joined
-    joined=$(list_items "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g' | paste -sd'|')
-    [[ -n "${joined}" ]] && echo "^(${joined})" || echo 'a^'
-}
-
-list_set() {
-    LISTS[$1]=$(grep . <<< "$2" || true)
-}
-
-load_lists() {
-    local name line section=""
-    for name in "${LIST_NAMES[@]}"; do
-        LISTS[$name]=$(default_list "${name}")
-    done
-    [[ -f "${LISTS_FILE}" ]] || { save_lists; return; }
-    while IFS= read -r line; do
-        line="${line%%#*}"
-        line="${line//[[:space:]]/}"
-        [[ -z "${line}" ]] && continue
-        if [[ "${line}" =~ ^\[(.+)\]$ ]]; then
-            section="${BASH_REMATCH[1]}"
-            [[ -n "${LIST_LABELS[$section]:-}" ]] && LISTS[$section]="" || section=""
-        elif [[ -n "${section}" ]]; then
-            LISTS[$section]+="${LISTS[$section]:+$'\n'}${line}"
-        fi
-    done < "${LISTS_FILE}"
-}
-
-save_lists() {
+mark_kept() {
     local name
-    {
-        echo "# CyberPatriot script lists - one entry per line under each [section]."
-        echo "# Edit here or with 'L) Edit lists' in the script menu."
-        for name in "${LIST_NAMES[@]}"; do
-            echo ""
-            echo "[${name}]"
-            list_items "${name}"
-        done
-    } > "${LISTS_FILE}"
-}
-
-# Anything in the README critical/required lists is never offered for removal.
-is_protected() {
-    local name="${1%.service}" entry
-    name="${name,,}"
-    while IFS= read -r entry; do
-        entry="${entry,,}"
-        [[ -z "${entry}" ]] && continue
-        [[ "${name}" == *"${entry}"* ]] && return 0
-        ((${#name} >= 3)) && [[ "${entry}" == *"${name}"* ]] && return 0
-    done < <(list_items critical_services; list_items required_software)
-    return 1
-}
-
-protection_note() {
-    if [[ -z "${LISTS[critical_services]:-}" ]]; then
-        echo "NOTE: no critical services entered. Use S) README setup so required services are protected."
-    fi
-}
-
-edit_one_list() {
-    local name="$1" choice input entry i
-    local -a items keep
-    while true; do
-        mapfile -t items < <(list_items "${name}")
-        echo ""
-        echo "[${name}] ${LIST_LABELS[$name]}"
-        ((${#items[@]} == 0)) && echo "  (empty)"
-        for i in "${!items[@]}"; do
-            printf "  %3d) %s\n" $((i + 1)) "${items[i]}"
-        done
-        echo "  a) Add   r) Remove   d) Restore defaults   c) Clear   b) Back"
-        read -r -p "> " choice || return
-        case "${choice,,}" in
-            a)
-                read -r -p "Entries to add (space separated): " input
-                for entry in ${input//,/ }; do
-                    list_has "${name}" "${entry}" || LISTS[$name]+="${LISTS[$name]:+$'\n'}${entry}"
-                done
-                ;;
-            r)
-                read -r -p "Numbers to remove (e.g. 1 3 5-7): " input
-                keep=("${items[@]}")
-                for i in $(parse_selection "${input}" "${#items[@]}"); do
-                    unset 'keep[i-1]'
-                done
-                list_set "${name}" "$(printf '%s\n' "${keep[@]}")"
-                ;;
-            d) confirm "Restore the default ${name} list?" && LISTS[$name]=$(default_list "${name}") ;;
-            c) confirm "Clear the ${name} list?" && LISTS[$name]="" ;;
-            b | "") return ;;
-            *) continue ;;
-        esac
-        save_lists
+    for name in "$@"; do
+        [[ -n "${name}" ]] && KEPT[${name%.service}]=1
     done
 }
 
-edit_lists() {
-    local choice i
-    while true; do
-        header "Edit Lists"
-        echo "Saved in ${LISTS_FILE}"
-        for i in "${!LIST_NAMES[@]}"; do
-            printf "  %d) %-22s %-38s (%d)\n" $((i + 1)) "${LIST_NAMES[i]}" \
-                "${LIST_LABELS[${LIST_NAMES[i]}]}" "$(list_items "${LIST_NAMES[i]}" | grep -c .)"
-        done
-        echo "  b) Back"
-        read -r -p "Choose a list: " choice || return
-        [[ "${choice,,}" == "b" || -z "${choice}" ]] && return
-        if [[ "${choice}" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#LIST_NAMES[@]})); then
-            edit_one_list "${LIST_NAMES[choice - 1]}"
-        fi
-    done
-}
-
-readme_setup() {
-    header "README Setup"
-    echo "Type what the README says (space separated)."
-    echo "Enter = keep current value, '-' = clear it."
-    local name input
-    for name in critical_services required_software authorized_admins authorized_users; do
-        echo ""
-        echo "${LIST_LABELS[$name]}: $(list_items "${name}" | xargs)"
-        read -r -p "  New value: " input
-        case "${input}" in
-            "") ;;
-            -) LISTS[$name]="" ;;
-            *) list_set "${name}" "$(tr ' ,' '\n\n' <<< "${input}")" ;;
-        esac
-    done
-    save_lists
-    echo ""
-    echo "Saved. Protected from removal: $(list_items critical_services | xargs) $(list_items required_software | xargs)"
+is_kept() {
+    [[ -n "${1:-}" && -n "${KEPT[${1%.service}]:-}" ]]
 }
 
 ### 1. Users & Groups ###
 
-readme_role() {
-    [[ -z "${LISTS[authorized_admins]:-}${LISTS[authorized_users]:-}" ]] && return
-    if list_has authorized_admins "$1"; then
-        echo "admin"
-    elif list_has authorized_users "$1"; then
-        echo "standard"
-    else
-        echo "NOT IN README"
-    fi
-}
-
-suggest_action() {
-    case "$(readme_role "$1")" in
-        admin) is_admin "$1" && echo k || echo a ;;
-        standard) is_admin "$1" && echo s || echo k ;;
-        "NOT IN README") echo d ;;
-        *) echo k ;;
-    esac
-}
-
 print_user_table() {
     local user uid shell admin
-    printf "  %-18s %-7s %-18s %-6s %s\n" "USER" "UID" "SHELL" "ADMIN" "README SAYS"
+    printf "  %-18s %-7s %-20s %s\n" "USER" "UID" "SHELL" "ADMIN"
     for user in root $(human_users); do
         uid=$(id -u "${user}")
         shell=$(getent passwd "${user}" | cut -d: -f7)
         admin="no"
         { is_admin "${user}" || [[ "${user}" == "root" ]]; } && admin="YES"
-        printf "  %-18s %-7s %-18s %-6s %s\n" "${user}" "${uid}" "${shell}" "${admin}" \
-            "$([[ "${user}" == "root" ]] || readme_role "${user}")"
+        printf "  %-18s %-7s %-20s %s\n" "${user}" "${uid}" "${shell}" "${admin}"
     done
+}
+
+# Describes what an account is right now, e.g. "ADMIN (sudo, adm)".
+user_role_text() {
+    local groups
+    groups=$(id -nG "$1" | tr ' ' '\n' | grep -xE "sudo|adm|admin|wheel" | paste -sd, | sed 's/,/, /g')
+    if is_admin "$1"; then
+        echo "ADMIN (${groups})"
+    elif [[ -n "${groups}" ]]; then
+        echo "standard user (in ${groups})"
+    else
+        echo "standard user"
+    fi
 }
 
 make_admin() {
@@ -402,23 +221,23 @@ create_user() {
 }
 
 user_management() {
-    header "User Management"
-    local -a users missing=()
-    local user choice suggestion names name
+    header "User Review"
+    local -a users
+    local user choice names name
     local me="${SUDO_USER:-root}"
     mapfile -t users < <(human_users)
 
     print_user_table
     echo ""
-    echo "For each user: [k]eep, [a]dmin, [s]tandard user, [d]elete. Enter = suggested choice."
+    echo "For each user decide: [a]dmin, [u]ser (standard), [x] unauthorized (delete). Enter = leave as is."
     for user in "${users[@]}"; do
-        suggestion=$(suggest_action "${user}")
-        read -r -p "  ${user} (suggested: ${suggestion}): " choice
-        choice="${choice:-${suggestion}}"
+        echo ""
+        echo "  ${user} (UID $(id -u "${user}")) - currently: $(user_role_text "${user}")$([[ "${user}" == "${me}" ]] && echo ' (you are logged in as this user)')"
+        read -r -p "  Should be [a/u/x]: " choice
         case "${choice,,}" in
-            a) is_admin "${user}" || make_admin "${user}" ;;
-            s) is_admin "${user}" && make_standard "${user}" ;;
-            d)
+            a) is_admin "${user}" && echo "  Already an admin." || make_admin "${user}" ;;
+            u) is_admin "${user}" && make_standard "${user}" || echo "  Already a standard user." ;;
+            x)
                 if [[ "${user}" == "${me}" ]]; then
                     echo "  Refusing to delete ${user}, you are logged in as this user."
                 elif confirm "  Really delete ${user} and their home directory?"; then
@@ -431,16 +250,7 @@ user_management() {
     done
 
     echo ""
-    for name in $(list_items authorized_admins) $(list_items authorized_users); do
-        id "${name}" >/dev/null 2>&1 || missing+=("${name}")
-    done
-    if ((${#missing[@]} > 0)) && confirm "README users missing from the system: ${missing[*]}. Create them?"; then
-        for name in "${missing[@]}"; do
-            create_user "${name}"
-            list_has authorized_admins "${name}" && make_admin "${name}"
-        done
-    fi
-    if confirm "Create any other users?"; then
+    if confirm "Create any users from the README that are missing?"; then
         read -r -p "Usernames to create (space separated): " names
         for name in ${names}; do
             if id "${name}" >/dev/null 2>&1; then
@@ -481,20 +291,13 @@ user_management() {
 }
 
 verify_users() {
-    local others user role
+    local others
     others=$(awk -F: '$3 == 0 && $1 != "root" {print $1}' /etc/passwd | xargs)
     [[ -z "${others}" ]] && pass "Only root has UID 0" || warn "Other UID 0 accounts: ${others}"
     [[ -z "$(cut -d: -f3 /etc/passwd | sort | uniq -d)" ]] && pass "No duplicate UIDs" || warn "Duplicate UIDs found"
     passwd -S root | awk '{print $2}' | grep -q '^L' && pass "root account locked" || warn "root account not locked"
-    for user in $(human_users); do
-        role=$(readme_role "${user}")
-        case "${role}" in
-            "NOT IN README") warn "${user} is not in the README" ;;
-            admin) is_admin "${user}" || warn "${user} should be an admin" ;;
-            standard) is_admin "${user}" && warn "${user} should not be an admin" ;;
-        esac
-    done
     info "Admins: $(for u in $(human_users); do is_admin "$u" && printf '%s ' "$u"; done)"
+    info "Standard users: $(for u in $(human_users); do is_admin "$u" || printf '%s ' "$u"; done)"
 }
 
 show_groups() {
@@ -1041,7 +844,7 @@ ssh_hardening() {
         return
     fi
 
-    if ! is_protected openssh-server && ! confirm "Is SSH a required service in the README?"; then
+    if ! is_kept openssh-server && ! confirm "Is SSH a required service in the README?"; then
         if confirm "Stop and remove openssh-server?"; then
             systemctl disable --now ssh 2>/dev/null
             apt purge -y openssh-server && log "Removed openssh-server."
@@ -1156,7 +959,7 @@ ftp_config() {
         echo "vsftpd is not installed (${conf} not found)."
         return
     fi
-    is_protected vsftpd || echo "Note: vsftpd is not in the critical services list. Check the README."
+    is_kept vsftpd || echo "Check the README: if vsftpd is a critical service, configure it but never stop it."
     echo "Current settings:"
     grep -E '^#?(anonymous_enable|local_enable|write_enable|anon_upload_enable|anon_mkdir_write_enable|anon_root|chroot_local_user|ssl_enable)=' "${conf}" | sed 's/^/  /'
     echo ""
@@ -1211,68 +1014,161 @@ verify_ftp() {
 
 ### 5. Software & Services ###
 
-# Prints "unit<TAB>state" for installed services that are on the prohibited list.
-find_service_candidates() {
-    local unit name active enabled
-    {
-        systemctl list-units --type=service --all --no-pager --no-legend --plain 2>/dev/null | awk '{print $1}'
-        systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}'
-    } | sort -u | while read -r unit; do
-        name="${unit%.service}"
-        list_has prohibited_services "${name}" || continue
-        active=$(systemctl is-active "${unit}" 2>/dev/null)
-        enabled=$(systemctl is-enabled "${unit}" 2>/dev/null)
-        [[ "${active}" == "active" || "${enabled}" == "enabled" ]] || continue
-        printf '%s\t%s/%s\n' "${unit}" "${active}" "${enabled}"
-    done
+# Services the review looks for: "name|what it is".
+SERVICE_CANDIDATES=(
+    "nginx|Web server (hosts websites)"
+    "apache2|Web server (hosts websites)"
+    "squid|Web proxy (passes web traffic through itself)"
+    "dovecot|Email mailbox server (POP3/IMAP)"
+    "postfix|Email sending server (SMTP)"
+    "sendmail|Email sending server (SMTP)"
+    "exim4|Email sending server (SMTP)"
+    "smbd|Samba Windows-style file sharing"
+    "nmbd|Samba name service"
+    "vsftpd|FTP file server"
+    "pure-ftpd|FTP file server"
+    "proftpd|FTP file server"
+    "tftpd-hpa|TFTP file transfer with no password"
+    "atftpd|TFTP file transfer with no password"
+    "inetd|Old super-server that starts telnet and similar"
+    "xinetd|Old super-server that starts telnet and similar"
+    "ssh|SSH remote login server"
+    "snmpd|SNMP network monitoring (leaks system info)"
+    "nfs-server|NFS Unix file sharing"
+    "rpcbind|RPC helper used by NFS"
+    "bind9|DNS server"
+    "named|DNS server"
+    "cups|Printing service"
+    "avahi-daemon|Announces this computer on the local network"
+    "x11vnc|VNC remote desktop"
+    "vncserver|VNC remote desktop"
+    "mysql|MySQL database"
+    "mariadb|MariaDB database"
+    "postgresql|PostgreSQL database"
+    "openvpn|VPN tunnel"
+    "rsync|rsync file sync daemon"
+)
+
+# Packages the review looks for (hacking tools, servers, file sharing, torrents).
+PACKAGE_CANDIDATES=(john john-data hydra hydra-gtk nmap zenmap wireshark wireshark-qt
+    wireshark-common tshark netcat netcat-traditional netcat-openbsd ncat aircrack-ng ophcrack
+    ophcrack-cli ettercap-common ettercap-graphical kismet nikto sqlmap medusa fcrackzip hashcat
+    doona xprobe xprobe2 nginx nginx-core apache2 squid dovecot-core dovecot-imapd dovecot-pop3d
+    samba bind9 vsftpd pure-ftpd proftpd-basic proftpd-core tftpd atftpd tftpd-hpa x11vnc
+    tightvncserver tigervnc-standalone-server vnc4server snmp snmpd nfs-kernel-server rpcbind
+    sendmail sendmail-bin postfix xinetd telnetd telnet inetutils-telnetd rsh-server rsh-client
+    nis deluge transmission-gtk transmission-daemon qbittorrent)
+
+service_package() {
+    local unit_file
+    unit_file=$(systemctl show -p FragmentPath --value "$1" 2>/dev/null)
+    [[ -n "${unit_file}" ]] && dpkg -S "${unit_file}" 2>/dev/null | head -1 | cut -d: -f1
 }
 
-disable_service() {
-    local unit="$1"
-    if is_protected "${unit}"; then
-        echo "  ${unit} is a protected (critical) service, skipping."
-        return
-    fi
-    systemctl disable --now "${unit}" && log "Disabled and stopped ${unit}."
-    systemctl list-unit-files "${unit%.service}.socket" --no-legend 2>/dev/null | grep -q . \
-        && systemctl disable --now "${unit%.service}.socket" 2>/dev/null
+service_found() {
+    local active enabled
+    active=$(systemctl is-active "$1" 2>/dev/null)
+    enabled=$(systemctl is-enabled "$1" 2>/dev/null)
+    [[ "${active}" == "active" || "${enabled}" == "enabled" ]] && echo "${active}/${enabled}"
 }
 
-services_manage() {
-    header "Services"
-    protection_note
-    echo "Listening ports:"
-    ss -tulnp
+find_candidate_packages() {
+    dpkg-query -W -f='${Package} ${Status}\n' 2>/dev/null | awk '$NF == "installed" {print $1}' \
+        | grep -xF -f <(printf '%s\n' "${PACKAGE_CANDIDATES[@]}")
+}
+
+remove_game_item() {
+    local type="$1" name="$2"
+    case "${type}" in
+        apt) apt purge "${name}" && log "Purged game package ${name}." ;;
+        snap) snap remove "${name}" && log "Removed snap ${name}." ;;
+        flatpak) flatpak uninstall -y "${name}" && log "Removed flatpak ${name}." ;;
+        file) rm -rf -- "${name}" && log "Deleted file ${name}." ;;
+    esac
+}
+
+software_review() {
+    header "Applications & Services Review"
+    echo "Each item found on this machine is shown with what it does."
+    echo "Check the README: keep critical services and required software, remove the rest."
+    local -a kept=() disabled=() removed=() handled=() games
+    local row name desc unit state pkg choice item type names
+
     echo ""
-    local -a rows units=() skipped=()
-    local i row choice names name
-    mapfile -t rows < <(find_service_candidates)
-    for row in "${rows[@]}"; do
-        if is_protected "${row%%$'\t'*}"; then
-            skipped+=("${row%%$'\t'*}")
+    echo "--- Services ---"
+    for row in "${SERVICE_CANDIDATES[@]}"; do
+        IFS='|' read -r name desc <<< "${row}"
+        unit="${name}.service"
+        state=$(service_found "${unit}") || continue
+        pkg=$(service_package "${unit}")
+        [[ -n "${pkg}" ]] && handled+=("${pkg}")
+        echo ""
+        echo "  ${name}: ${desc}"
+        echo "    state: ${state}${pkg:+   package: ${pkg}}"
+        read -r -p "    [k]eep  [d]isable (stop it)  [r]emove (stop + uninstall)  (Enter = keep): " choice
+        case "${choice,,}" in
+            d) disable_service "${unit}"; disabled+=("${name}") ;;
+            r)
+                disable_service "${unit}"
+                [[ -n "${pkg}" ]] && apt purge "${pkg}" && log "Purged package ${pkg}."
+                removed+=("${name}")
+                ;;
+            *) mark_kept "${name}" "${pkg}"; kept+=("${name}") ;;
+        esac
+    done
+    ((${#kept[@]} + ${#disabled[@]} + ${#removed[@]} == 0)) && echo "  None of the known services are running or enabled."
+
+    echo ""
+    echo "--- Software ---"
+    local found=0
+    for pkg in $(find_candidate_packages); do
+        printf '%s\n' "${handled[@]}" | grep -qxF -- "${pkg}" && continue
+        pkg_installed "${pkg}" || continue
+        found=1
+        echo ""
+        echo "  ${pkg}: $(dpkg-query -W -f='${binary:Summary}' "${pkg}" 2>/dev/null)"
+        read -r -p "    [k]eep  [r]emove  (Enter = keep): " choice
+        if [[ "${choice,,}" == "r" ]]; then
+            apt purge "${pkg}" && log "Purged package ${pkg}." && removed+=("${pkg}")
         else
-            units+=("${row}")
+            mark_kept "${pkg}"
+            kept+=("${pkg}")
         fi
     done
-    ((${#skipped[@]} > 0)) && echo "Protected (not shown): ${skipped[*]}"
+    ((found)) || echo "  None of the known hacking tools or servers are installed."
 
-    if ((${#units[@]} == 0)); then
-        echo "No services from the prohibited list are running or enabled."
-    else
-        echo "Services on the prohibited list (state = active/enabled):"
-        for i in "${!units[@]}"; do
-            printf "  %2d) %-30s %s\n" $((i + 1)) "${units[i]%%$'\t'*}" "${units[i]#*$'\t'}"
-        done
-        read -r -p "Numbers to DISABLE and stop (e.g. 1 3, all, Enter = none): " choice
-        for i in $(parse_selection "${choice}" "${#units[@]}"); do
-            name="${units[i - 1]%%$'\t'*}"
-            confirm "Disable and stop ${name}?" && disable_service "${name}"
-        done
+    echo ""
+    echo "--- Games ---"
+    mapfile -t games < <(find_games)
+    found=0
+    for item in "${games[@]}"; do
+        type="${item%%$'\t'*}"
+        name="${item#*$'\t'}"
+        [[ "${type}" == "apt" ]] && ! pkg_installed "${name}" && continue
+        found=1
+        echo ""
+        echo "  ${name} (${type})"
+        read -r -p "    [k]eep  [r]emove  (Enter = keep): " choice
+        if [[ "${choice,,}" == "r" ]]; then
+            remove_game_item "${type}" "${name}" && removed+=("${name}")
+        else
+            mark_kept "${name}"
+            kept+=("${name}")
+        fi
+    done
+    ((found)) || echo "  No likely games found."
+
+    echo ""
+    echo "Kept:     ${kept[*]:-none}"
+    echo "Disabled: ${disabled[*]:-none}"
+    echo "Removed:  ${removed[*]:-none}"
+    if ((${#removed[@]} > 0)) && confirm "Run apt autoremove to clean up leftover dependencies?"; then
+        apt autoremove -y
     fi
 
     echo ""
     if confirm "Show all running services and disable others by name?"; then
-        systemctl list-units --type=service --state=running --no-pager --no-legend --plain | awk '{print "  " $1}'
+        systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null | awk '{print "  " $1}'
         read -r -p "Service names to disable (space separated, Enter = none): " names
         for name in ${names}; do
             [[ "${name}" == *.service ]] || name="${name}.service"
@@ -1281,18 +1177,35 @@ services_manage() {
     fi
 }
 
-verify_services() {
-    local row name
-    while IFS= read -r row; do
-        [[ -z "${row}" ]] && continue
-        name="${row%%$'\t'*}"
-        is_protected "${name}" || warn "${name} still ${row#*$'\t'}"
-    done < <(find_service_candidates)
-    while IFS= read -r name; do
-        systemctl list-unit-files "${name}.service" --no-legend 2>/dev/null | grep -q . || continue
-        systemctl is-active --quiet "${name}" 2>/dev/null && pass "Critical service ${name} running" \
-            || warn "CRITICAL service ${name} is NOT running"
-    done < <(list_items critical_services)
+verify_software_review() {
+    local row name desc state pkg item bad=0
+    for row in "${SERVICE_CANDIDATES[@]}"; do
+        IFS='|' read -r name desc <<< "${row}"
+        is_kept "${name}" && continue
+        state=$(service_found "${name}.service") && { warn "${name} still ${state}"; bad=1; }
+    done
+    for pkg in $(find_candidate_packages); do
+        is_kept "${pkg}" || { warn "${pkg} still installed"; bad=1; }
+    done
+    while IFS= read -r item; do
+        [[ -z "${item}" ]] && continue
+        is_kept "${item#*$'\t'}" || { warn "Possible game: ${item#*$'\t'}"; bad=1; }
+    done < <(find_games)
+    for row in "${SERVICE_CANDIDATES[@]}"; do
+        name="${row%%|*}"
+        is_kept "${name}" && service_found "${name}.service" >/dev/null && ! systemctl is-active --quiet "${name}" 2>/dev/null \
+            && warn "Kept service ${name} is NOT running"
+    done
+    ((bad == 0)) && pass "No unreviewed services, tools or games left"
+    ((${#KEPT[@]} > 0)) && info "Kept this run: ${!KEPT[*]}"
+    return 0
+}
+
+disable_service() {
+    local unit="$1"
+    systemctl disable --now "${unit}" && log "Disabled and stopped ${unit}."
+    systemctl list-unit-files "${unit%.service}.socket" --no-legend 2>/dev/null | grep -q . \
+        && systemctl disable --now "${unit%.service}.socket" 2>/dev/null
 }
 
 # Prints "proto<TAB>port<TAB>pid" for each listening socket.
@@ -1343,8 +1256,8 @@ backdoor_check() {
         IFS=$'\t' read -r proto port pid <<< "${rows[i - 1]}"
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
         cmd=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)
-        if is_protected "$(cat "/proc/${pid}/comm" 2>/dev/null)"; then
-            echo "  ${cmd} is a protected (critical) service, skipping."
+        if is_kept "$(cat "/proc/${pid}/comm" 2>/dev/null)"; then
+            echo "  ${cmd} was kept as a required service, skipping."
             continue
         fi
         mapfile -t scripts < <(unowned_scripts "${pid}")
@@ -1390,57 +1303,9 @@ verify_backdoor() {
     ((bad == 0)) && pass "No suspicious listeners"
 }
 
-find_prohibited_packages() {
-    dpkg-query -W -f='${Package} ${Status}\n' 2>/dev/null \
-        | awk '$NF == "installed" {print $1}' | grep -ixF -f <(list_items prohibited_software; echo "__none__")
-}
-
-prohibited_software() {
-    header "Prohibited Software"
-    protection_note
-    echo "Edit what counts as prohibited with L) Edit lists -> prohibited_software."
-    local -a pkgs=() selected=() skipped=()
-    local i choice pkg
-    while IFS= read -r pkg; do
-        if is_protected "${pkg}"; then skipped+=("${pkg}"); else pkgs+=("${pkg}"); fi
-    done < <(find_prohibited_packages)
-    ((${#skipped[@]} > 0)) && echo "Protected (not shown): ${skipped[*]}"
-    if ((${#pkgs[@]} == 0)); then
-        echo "No packages from the prohibited list are installed."
-        return
-    fi
-
-    for i in "${!pkgs[@]}"; do
-        printf "  %2d) %-26s %s\n" $((i + 1)) "${pkgs[i]}" \
-            "$(dpkg-query -W -f='${binary:Summary}' "${pkgs[i]}" 2>/dev/null)"
-    done
-    read -r -p "Numbers to REMOVE (e.g. 1 3 5-7, all, Enter = none): " choice
-    for i in $(parse_selection "${choice}" "${#pkgs[@]}"); do
-        selected+=("${pkgs[i - 1]}")
-    done
-    ((${#selected[@]} == 0)) && return
-
-    echo "Selected: ${selected[*]}"
-    echo "apt will show everything that gets removed and ask before continuing."
-    apt purge "${selected[@]}" && log "Purged packages: ${selected[*]}"
-    if confirm "Run apt autoremove to clean up leftover dependencies?"; then
-        apt autoremove -y
-    fi
-}
-
-verify_software() {
-    local remaining pkg
-    for pkg in $(find_prohibited_packages); do
-        is_protected "${pkg}" || remaining+="${pkg} "
-    done
-    [[ -z "${remaining:-}" ]] && pass "No prohibited packages installed" \
-        || warn "Still installed: ${remaining}"
-}
-
 # Prints "type<TAB>name" for every likely game found.
 find_games() {
-    local file pkg regex
-    regex=$(list_regex game_keywords)
+    local file pkg regex="^(${GAME_KEYWORDS})"
     {
         dpkg-query -W -f='${Section}\t${Package}\t${Status}\n' 2>/dev/null \
             | awk -F'\t' '$3 ~ / installed$/ && $1 ~ /games$/ {print "apt\t" $2}'
@@ -1463,48 +1328,7 @@ find_games() {
                 echo -e "file\t${file}"
             fi
         done
-    } | sort -u | while IFS= read -r file; do
-        is_protected "${file#*$'\t'}" || echo "${file}"
-    done
-}
-
-game_software() {
-    header "Game Software Detection"
-    echo "Also lists loose files in /usr/games (e.g. archives of hacking tools)."
-    local -a games apt_pkgs=()
-    local i choice type name
-    mapfile -t games < <(find_games)
-    if ((${#games[@]} == 0)); then
-        echo "No likely games found."
-        return
-    fi
-
-    for i in "${!games[@]}"; do
-        printf "  %2d) %-8s %s\n" $((i + 1)) "${games[i]%%$'\t'*}" "${games[i]#*$'\t'}"
-    done
-    read -r -p "Numbers to REMOVE (e.g. 1 3 5-7, all, Enter = none): " choice
-
-    for i in $(parse_selection "${choice}" "${#games[@]}"); do
-        type="${games[i - 1]%%$'\t'*}"
-        name="${games[i - 1]#*$'\t'}"
-        case "${type}" in
-            apt) apt_pkgs+=("${name}") ;;
-            snap) confirm "Remove snap ${name}?" && snap remove "${name}" && log "Removed snap ${name}." ;;
-            flatpak) confirm "Remove flatpak ${name}?" && flatpak uninstall -y "${name}" && log "Removed flatpak ${name}." ;;
-            file) confirm "Delete ${name}?" && rm -rf -- "${name}" && log "Deleted file ${name}." ;;
-        esac
-    done
-
-    if ((${#apt_pkgs[@]} > 0)); then
-        echo "apt will show everything that gets removed and ask before continuing."
-        apt purge "${apt_pkgs[@]}" && log "Purged game packages: ${apt_pkgs[*]}"
-    fi
-}
-
-verify_games() {
-    local count
-    count=$(find_games | grep -c .)
-    ((count == 0)) && pass "No likely games found" || warn "${count} possible games remain"
+    } | sort -u
 }
 
 ### 6. Files ###
@@ -1521,7 +1345,7 @@ ftp_dirs() {
 find_media() {
     local mode="${1:-normal}" ext dir
     local -a expr=() dirs=() prune=()
-    for ext in $(list_items media_types); do
+    for ext in "${MEDIA_EXTS[@]}"; do
         expr+=(-o -iname "*.${ext}")
     done
     ((${#expr[@]} == 0)) && return
@@ -1544,17 +1368,16 @@ prohibited_media() {
     if ! confirm "Does the README say media files are prohibited / scan for them?"; then
         return
     fi
-    echo "File types (edit with L) Edit lists -> media_types): $(list_items media_types | xargs)"
+    echo "File types: ${MEDIA_EXTS[*]}"
     local extra i choice ftp_count
-    read -r -p "Extra extensions for this scan only (space separated, Enter = none): " extra
+    read -r -p "Extra extensions to search for (space separated, Enter = none): " extra
     for i in ${extra}; do
-        LISTS[media_types]+=$'\n'"${i#.}"
+        MEDIA_EXTS+=("${i#.}")
     done
 
     local -a files selected=()
     mapfile -d '' files < <(find_media)
     ftp_count=$(find_media ftp | tr -cd '\0' | wc -c)
-    load_lists
     ((ftp_count > 0)) && echo "Skipped ${ftp_count} file(s) in FTP folders ($(ftp_dirs | xargs)). Deleting those can cost points."
     if ((${#files[@]} == 0)); then
         echo "No matching media files found."
@@ -1762,20 +1585,19 @@ CAT_FUNCS=(
     "password_policy account_lockout login_screen"
     "system_updates"
     "firewall_setup ssh_hardening kernel_hardening ftp_config"
-    "services_manage backdoor_check prohibited_software game_software"
+    "software_review backdoor_check"
     "prohibited_media cron_review file_permissions"
     "antivirus_audit"
     "forensic_ports forensic_find forensic_base64 forensic_hash forensic_lookup forensic_recent"
 )
 declare -A TITLE=(
-    [user_management]="User Management" [group_management]="Group Management"
+    [user_management]="User Review" [group_management]="Group Management"
     [password_audit]="Password Audit" [sudoers_audit]="Sudoers Audit"
     [password_policy]="Password Policy" [account_lockout]="Account Lockout"
     [login_screen]="Login Screen (LightDM/GDM)" [system_updates]="System Updates"
     [firewall_setup]="Firewall" [ssh_hardening]="SSH Hardening"
     [kernel_hardening]="Kernel / Network (sysctl)" [ftp_config]="FTP Server (vsftpd)"
-    [services_manage]="Services" [backdoor_check]="Backdoor / Listener Check"
-    [prohibited_software]="Prohibited Software" [game_software]="Game Software"
+    [software_review]="Applications & Services Review" [backdoor_check]="Backdoor / Listener Check"
     [prohibited_media]="Prohibited Media Files" [cron_review]="Cron Jobs Review"
     [file_permissions]="File Permissions" [antivirus_audit]="Antivirus / Auditing"
     [forensic_ports]="Listening Ports and Processes" [forensic_find]="Find Files"
@@ -1789,8 +1611,7 @@ declare -A VERIFY_FN=(
     [login_screen]=verify_login [system_updates]=verify_updates
     [firewall_setup]=verify_firewall [ssh_hardening]=verify_ssh
     [kernel_hardening]=verify_kernel [ftp_config]=verify_ftp
-    [services_manage]=verify_services [backdoor_check]=verify_backdoor
-    [prohibited_software]=verify_software [game_software]=verify_games
+    [software_review]=verify_software_review [backdoor_check]=verify_backdoor
     [prohibited_media]=verify_media [cron_review]=verify_cron
     [file_permissions]=verify_permissions [antivirus_audit]=verify_antivirus
 )
@@ -1875,7 +1696,6 @@ show_main_menu() {
         printf "  %d) %s\n" $((i + 1)) "${CATEGORIES[i]}"
     done
     echo ""
-    echo "  S) README setup     L) Edit lists"
     echo "  V) Verify all       0) Exit"
 }
 
@@ -1893,23 +1713,16 @@ change_summary() {
 
 main() {
     local choice
-    load_lists
     [[ -f "${LOG_FILE}" ]] && SESSION_START=$(wc -l < "${LOG_FILE}")
     log "=== CyberPatriot hardening script started ==="
     echo ""
     echo "REMINDER: Read the README and answer the forensic questions BEFORE making changes."
-    echo "Lists file: ${LISTS_FILE}"
-    if confirm "Enter README info now (critical services, required software, authorized users)?"; then
-        readme_setup
-    fi
 
     while true; do
         show_main_menu
         read -r -p "Select a category: " choice || break
         case "${choice,,}" in
             0 | q | exit) break ;;
-            s) readme_setup ;;
-            l) edit_lists ;;
             v) verify_all; pause ;;
             *)
                 if [[ "${choice}" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#CATEGORIES[@]})); then
