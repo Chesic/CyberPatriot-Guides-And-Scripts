@@ -20,7 +20,7 @@ GAME_KEYWORDS="aisleriot|gnome-mines|gnome-sudoku|gnome-mahjongg|gnome-chess|gno
 SESSION_START=0
 
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "This script must be run as root (try: sudo ./cyberPatriot_Script.sh)"
+    echo "This script must be run as root (try: sudo ./cyberPatriot_Script_Ubuntu.sh)"
     exit 1
 fi
 
@@ -153,6 +153,20 @@ set_pam_option() {
     else
         sed -i -E "/${line_re}/ s/$/ ${key}=${value}/" "${file}"
     fi
+}
+
+os_value() {
+    sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | tr -d '"' | head -1
+}
+
+check_os() {
+    local id like
+    id=$(os_value ID)
+    like=$(os_value ID_LIKE)
+    [[ "${id}" == "ubuntu" || "${like}" == *ubuntu* ]] && return
+    echo "WARNING: this script is for Ubuntu / Linux Mint, but this system reports '${id:-unknown}'."
+    [[ "${id}" == "debian" || "${like}" == *debian* ]] && echo "Use linux_scripts/debian/cyberPatriot_Script_Debian.sh instead."
+    confirm "Continue anyway?" || exit 1
 }
 
 ### Keep Decisions ###
@@ -1714,6 +1728,7 @@ change_summary() {
 main() {
     local choice
     [[ -f "${LOG_FILE}" ]] && SESSION_START=$(wc -l < "${LOG_FILE}")
+    check_os
     log "=== CyberPatriot hardening script started ==="
     echo ""
     echo "REMINDER: Read the README and answer the forensic questions BEFORE making changes."

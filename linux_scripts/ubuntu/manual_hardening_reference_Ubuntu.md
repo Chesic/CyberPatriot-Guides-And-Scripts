@@ -1,4 +1,4 @@
-# Linux Hardening Reference (Manual)
+# Ubuntu / Linux Mint Hardening Reference (Manual)
 
 A step-by-step guide to securing an Ubuntu or Linux Mint image by hand.
 Each section explains **what the thing is**, **why it matters**, and gives
