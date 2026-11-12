@@ -1,2 +1,4 @@
 cyberpatriot_hardening.log
+cyberpatriot_*.txt
+*.bak
 *.bak.*

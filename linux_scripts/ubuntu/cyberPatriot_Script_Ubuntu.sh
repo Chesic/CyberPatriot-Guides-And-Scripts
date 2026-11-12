@@ -67,6 +67,25 @@ pkg_installed() {
     dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
+# Prints the package that owns a file. Tries the /usr and non-/usr spelling of the path.
+pkg_owner() {
+    local path="$1" alt out
+    case "${path}" in
+        /usr/bin/* | /usr/sbin/* | /usr/lib*) alt="${path#/usr}" ;;
+        /bin/* | /sbin/* | /lib*) alt="/usr${path}" ;;
+        *) alt="" ;;
+    esac
+    out=$(dpkg -S "${path}" 2>/dev/null) || { [[ -n "${alt}" ]] && out=$(dpkg -S "${alt}" 2>/dev/null); } || return 1
+    head -1 <<< "${out}" | cut -d: -f1
+}
+
+# Prints the input, or "(none found)" when there is none.
+or_none() {
+    local out
+    out=$(cat)
+    if [[ -n "${out}" ]]; then echo "${out}"; else echo "  (none found)"; fi
+}
+
 human_users() {
     awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd
 }
@@ -169,6 +188,14 @@ check_os() {
     confirm "Continue anyway?" || exit 1
 }
 
+sudo_admins() {
+    getent group sudo | cut -d: -f4 | tr ',' ' ' | xargs
+}
+
+is_last_admin() {
+    [[ "$(sudo_admins)" == "$1" ]]
+}
+
 ### Keep Decisions ###
 
 # Things answered "keep" this run, so later checks and functions leave them alone.
@@ -229,9 +256,41 @@ make_standard() {
 }
 
 create_user() {
-    useradd -m -s /bin/bash "$1" && log "Created user $1."
-    echo "  Set a password for $1:"
+    useradd -m -s /bin/bash "$1" || { echo "  Could not create $1."; return 1; }
+    log "Created user $1."
+    echo "  Set a password for $1 (12+ characters):"
     passwd "$1"
+    if confirm "  Must $1 change this password at next login?"; then
+        passwd -e "$1" >/dev/null && log "Set $1 to change password at next login."
+    fi
+}
+
+delete_user() {
+    local user="$1"
+    if pgrep -u "${user}" >/dev/null 2>&1; then
+        echo "  ${user} has running programs (may be logged in)."
+        confirm "  Stop them so the account can be deleted?" && pkill -KILL -u "${user}" && sleep 1
+    fi
+    userdel -r "${user}" 2>/dev/null || userdel "${user}" 2>/dev/null
+    if id "${user}" >/dev/null 2>&1; then
+        echo "  Could not delete ${user}."
+    else
+        log "Deleted user ${user}."
+    fi
+}
+
+# Lists the human users by number and prints the ones chosen.
+pick_users() {
+    local -a users
+    local i choice
+    mapfile -t users < <(human_users)
+    for i in "${!users[@]}"; do
+        printf "  %2d) %s\n" $((i + 1)) "${users[i]}" >&2
+    done
+    read -r -p "$1 (e.g. 1 3, all, Enter = none): " choice
+    for i in $(parse_selection "${choice}" "${#users[@]}"); do
+        echo "${users[i - 1]}"
+    done
 }
 
 user_management() {
@@ -250,13 +309,20 @@ user_management() {
         read -r -p "  Should be [a/u/x]: " choice
         case "${choice,,}" in
             a) is_admin "${user}" && echo "  Already an admin." || make_admin "${user}" ;;
-            u) is_admin "${user}" && make_standard "${user}" || echo "  Already a standard user." ;;
+            u)
+                if ! is_admin "${user}"; then
+                    echo "  Already a standard user."
+                elif ! is_last_admin "${user}" || confirm "  ${user} is the LAST admin. Remove admin rights anyway?"; then
+                    make_standard "${user}"
+                fi
+                ;;
             x)
                 if [[ "${user}" == "${me}" ]]; then
                     echo "  Refusing to delete ${user}, you are logged in as this user."
+                elif is_last_admin "${user}" && ! confirm "  ${user} is the LAST admin. Delete anyway?"; then
+                    continue
                 elif confirm "  Really delete ${user} and their home directory?"; then
-                    userdel -r "${user}" 2>/dev/null || userdel "${user}"
-                    log "Deleted user ${user}."
+                    delete_user "${user}"
                 fi
                 ;;
             *) ;;
@@ -271,7 +337,7 @@ user_management() {
                 echo "  ${name} already exists."
                 continue
             fi
-            create_user "${name}"
+            create_user "${name}" || continue
             confirm "  Make ${name} an admin?" && make_admin "${name}"
         done
     fi
@@ -406,7 +472,19 @@ password_issue() {
 
 meets_policy() {
     local pw="$1"
-    [[ ${#pw} -ge 10 && "${pw}" =~ [A-Z] && "${pw}" =~ [a-z] && "${pw}" =~ [0-9] && "${pw}" =~ [^A-Za-z0-9] ]]
+    [[ ${#pw} -ge 12 && "${pw}" =~ [A-Z] && "${pw}" =~ [a-z] && "${pw}" =~ [0-9] && "${pw}" =~ [^A-Za-z0-9] ]]
+}
+
+prompt_new_password() {
+    local pw
+    while true; do
+        read -r -s -p "New password (Enter = Cyb3rPatr!0t\$): " pw
+        echo "" >&2
+        pw="${pw:-Cyb3rPatr!0t\$}"
+        meets_policy "${pw}" && break
+        echo "Password must be 12+ characters with upper, lower, number and symbol." >&2
+    done
+    printf '%s' "${pw}"
 }
 
 password_audit() {
@@ -415,7 +493,7 @@ password_audit() {
     echo "Passwords that pass these checks are left alone."
     echo ""
     local -a flagged=()
-    local user issue status new_pw
+    local user issue status new_pw=""
     for user in root $(human_users); do
         issue=$(password_issue "${user}")
         status=$(passwd -S "${user}" 2>/dev/null | awk '{print $2}')
@@ -429,20 +507,12 @@ password_audit() {
         fi
     done
 
-    if ((${#flagged[@]} == 0)); then
-        echo ""
-        echo "No insecure passwords found."
-        return
-    fi
-
     echo ""
-    while true; do
-        read -r -s -p "New password for flagged users (Enter = Cyb3rPatr!0t\$): " new_pw
-        echo ""
-        new_pw="${new_pw:-Cyb3rPatr!0t\$}"
-        meets_policy "${new_pw}" && break
-        echo "Password must be 10+ chars with upper, lower, number and symbol."
-    done
+    if ((${#flagged[@]} == 0)); then
+        echo "No insecure passwords detected."
+    else
+        new_pw=$(prompt_new_password)
+    fi
 
     for user in "${flagged[@]}"; do
         if [[ "${user}" == "root" ]] && confirm "Lock root instead of giving it a password?"; then
@@ -451,6 +521,20 @@ password_audit() {
             echo "${user}:${new_pw}" | chpasswd && log "Changed password for ${user}."
         fi
     done
+
+    echo ""
+    echo "The script can't see passwords the README lists. Short ones (under 12 characters) should be changed."
+    if confirm "Reset the password of any other users?"; then
+        for user in $(pick_users "Users to reset"); do
+            [[ -n "${new_pw}" ]] || new_pw=$(prompt_new_password)
+            echo "${user}:${new_pw}" | chpasswd && log "Changed password for ${user}."
+        done
+    fi
+    if confirm "Make any users change their password at next login?"; then
+        for user in $(pick_users "Users who must change it"); do
+            passwd -e "${user}" >/dev/null && log "Set ${user} to change password at next login."
+        done
+    fi
 }
 
 verify_passwords() {
@@ -537,7 +621,7 @@ password_policy() {
 
     echo ""
     grep -E "${UNIX_PW_LINE}" "${common_pw}"
-    for opt in minlen=10 remember=5; do
+    for opt in minlen=12 remember=5; do
         if confirm "Add ${opt} to the pam_unix line in ${common_pw}?"; then
             ((backed_up)) || { backup_file "${common_pw}"; backed_up=1; }
             set_pam_option "${common_pw}" "${UNIX_PW_LINE}" "${opt%%=*}" "${opt#*=}"
@@ -556,7 +640,7 @@ password_policy() {
             if ! grep -q "pam_pwquality.so" "${common_pw}"; then
                 sed -i "0,/${UNIX_PW_LINE}/s//password\trequisite\t\t\tpam_pwquality.so retry=3\n&/" "${common_pw}"
             fi
-            for opt in minlen=10 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 difok=3; do
+            for opt in minlen=12 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 difok=3; do
                 set_pam_option "${common_pw}" "pam_pwquality\.so" "${opt%%=*}" "${opt#*=}"
             done
             log "Updated pam_pwquality settings in ${common_pw}."
@@ -584,6 +668,8 @@ verify_policy() {
         grep -qE "${UNIX_PW_LINE}.*[[:space:]]${key}=" /etc/pam.d/common-password \
             && pass "pam_unix ${key} set" || warn "pam_unix ${key} not set"
     done
+    value=$(grep -E "${UNIX_PW_LINE}|pam_pwquality\.so" /etc/pam.d/common-password | grep -oE 'minlen=[0-9]+' | cut -d= -f2 | sort -n | tail -1)
+    [[ -n "${value}" ]] && ((value < 12)) && warn "Minimum password length is ${value} (12 or more is expected)"
     grep -q "nullok" /etc/pam.d/common-auth && warn "nullok still in common-auth" || pass "nullok removed"
 }
 
@@ -848,39 +934,69 @@ verify_firewall() {
     fi
 }
 
+# sshd_config lines that apply to everyone (before the first Match block).
+sshd_global_lines() {
+    sed -E '/^[[:space:]]*Match[[:space:]]/I,$d' "$1"
+}
+
+# sshd keywords ignore case and the first value wins, so every global copy is changed.
+set_sshd_value() {
+    local file="$1" key="$2" value="$3"
+    if sshd_global_lines "${file}" | grep -qiE "^[[:space:]]*${key}[[:space:]]"; then
+        sed -i -E "1,/^[[:space:]]*Match[[:space:]]/I s|^[[:space:]]*${key}[[:space:]].*|${key} ${value}|I" "${file}"
+    elif grep -qiE "^#[[:space:]]*${key}[[:space:]]" "${file}"; then
+        sed -i -E "0,/^#[[:space:]]*${key}[[:space:]]/I s|^#[[:space:]]*${key}[[:space:]].*|${key} ${value}|I" "${file}"
+    elif grep -qiE "^[[:space:]]*Match[[:space:]]" "${file}"; then
+        sed -i -E "0,/^[[:space:]]*Match[[:space:]]/I s|^([[:space:]]*Match[[:space:]])|${key} ${value}\n\1|I" "${file}"
+    else
+        echo "${key} ${value}" >> "${file}"
+    fi
+}
+
 ssh_hardening() {
     header "SSH Hardening"
     local sshd_config="/etc/ssh/sshd_config"
-    local setting
+    local setting key value file current
 
     if ! pkg_installed openssh-server; then
         echo "openssh-server is not installed, nothing to do."
         return
     fi
 
-    if ! is_kept openssh-server && ! confirm "Is SSH a required service in the README?"; then
+    if ! is_kept openssh-server && ! is_kept ssh && ! confirm "Is SSH a required service in the README?"; then
         if confirm "Stop and remove openssh-server?"; then
             systemctl disable --now ssh 2>/dev/null
             apt purge -y openssh-server && log "Removed openssh-server."
         fi
         return
     fi
+    mark_kept ssh openssh-server
 
     backup_file "${sshd_config}"
-    for setting in "PermitRootLogin no" "PermitEmptyPasswords no" "LoginGraceTime 60" \
-        "X11Forwarding no" "UsePAM yes" "PasswordAuthentication yes" "Protocol 2"; do
-        if confirm "Set '${setting}'?"; then
-            set_space_value "${sshd_config}" "${setting%% *}" "${setting#* }"
-            log "Set ${setting} in ${sshd_config}."
-        fi
+    for setting in "PermitRootLogin no" "PermitEmptyPasswords no" "LoginGraceTime 60" "MaxAuthTries 4" \
+        "X11Forwarding no" "IgnoreRhosts yes" "HostbasedAuthentication no" "PermitUserEnvironment no" \
+        "UsePAM yes" "PasswordAuthentication yes"; do
+        key="${setting%% *}"
+        value="${setting#* }"
+        confirm "Set '${setting}'?" || continue
+        set_sshd_value "${sshd_config}" "${key}" "${value}"
+        log "Set ${setting} in ${sshd_config}."
+        # Files in sshd_config.d are read first, so a different value there would win.
+        for file in /etc/ssh/sshd_config.d/*.conf; do
+            [[ -f "${file}" ]] || continue
+            current=$(sshd_global_lines "${file}" | grep -iE "^[[:space:]]*${key}[[:space:]]" | head -1)
+            [[ -z "${current}" ]] && continue
+            [[ "${current,,}" =~ ^[[:space:]]*${key,,}[[:space:]]+${value,,}[[:space:]]*$ ]] && continue
+            echo "  ${file} overrides it with: ${current}"
+            if confirm "  Change it there too?"; then
+                backup_file "${file}"
+                set_sshd_value "${file}" "${key}" "${value}"
+                log "Set ${setting} in ${file}."
+            fi
+        done
     done
 
-    if ls /etc/ssh/sshd_config.d/*.conf >/dev/null 2>&1; then
-        echo ""
-        echo "Note: files in /etc/ssh/sshd_config.d/ override sshd_config:"
-        grep -H -v '^\s*#' /etc/ssh/sshd_config.d/*.conf | grep .
-    fi
-
+    mkdir -p /run/sshd
     if ! sshd -t; then
         echo "sshd config test failed."
         restore_latest_backup "${sshd_config}"
@@ -895,13 +1011,19 @@ ssh_hardening() {
 verify_ssh() {
     pkg_installed openssh-server || { pass "openssh-server not installed"; return; }
     local effective
+    mkdir -p /run/sshd
     effective=$(sshd -T 2>/dev/null)
     grep -qi "^permitrootlogin no" <<< "${effective}" && pass "PermitRootLogin no" || warn "Root login allowed over SSH"
     grep -qi "^permitemptypasswords no" <<< "${effective}" && pass "PermitEmptyPasswords no" || warn "Empty passwords allowed over SSH"
     grep -qi "^x11forwarding no" <<< "${effective}" && pass "X11Forwarding no" || warn "X11Forwarding enabled"
 }
 
-SYSCTL_CONF="/etc/sysctl.conf"
+# Newer releases may not ship /etc/sysctl.conf; then a drop-in that sorts last is used.
+if [[ -f /etc/sysctl.conf ]]; then
+    SYSCTL_CONF="/etc/sysctl.conf"
+else
+    SYSCTL_CONF="/etc/sysctl.d/99-zz-cyberpatriot.conf"
+fi
 SYSCTL_SETTINGS=(
     "net.ipv4.conf.all.accept_redirects = 0"
     "net.ipv4.conf.default.accept_redirects = 0"
@@ -922,7 +1044,7 @@ SYSCTL_SETTINGS=(
     "kernel.randomize_va_space = 2"
 )
 
-# /etc/sysctl.conf loads last, so values go there to override anything else.
+# Values go to SYSCTL_CONF, which loads last, so they override anything else.
 set_sysctl_value() {
     local key="$1" value="$2" key_re="${1//./\\.}"
     if grep -qE "^[[:space:]]*${key_re}[[:space:]]*=" "${SYSCTL_CONF}"; then
@@ -932,6 +1054,34 @@ set_sysctl_value() {
     else
         echo "${key} = ${value}" >> "${SYSCTL_CONF}"
     fi
+}
+
+# Shows other /etc/sysctl.d files that set the same keys differently and offers to fix them.
+fix_sysctl_dropins() {
+    local file setting key want key_re
+    local -a hits=()
+    for file in /etc/sysctl.d/*.conf; do
+        [[ -f "${file}" && ! -L "${file}" && "${file}" != "${SYSCTL_CONF}" ]] || continue
+        for setting in "${SYSCTL_SETTINGS[@]}"; do
+            key="${setting%% =*}"
+            want="${setting##*= }"
+            key_re="${key//./\\.}"
+            grep -qE "^[[:space:]]*${key_re}[[:space:]]*=" "${file}" || continue
+            grep -qE "^[[:space:]]*${key_re}[[:space:]]*=[[:space:]]*${want}[[:space:]]*$" "${file}" && continue
+            hits+=("${file}|${key}|${want}")
+            echo "  ${file}: $(grep -E "^[[:space:]]*${key_re}[[:space:]]*=" "${file}" | head -1)   (want ${want})"
+        done
+    done
+    ((${#hits[@]} == 0)) && return
+    echo "${SYSCTL_CONF} loads last, so the values above are already overridden."
+    confirm "Fix those lines in their own files too?" || return
+    for setting in "${hits[@]}"; do
+        IFS='|' read -r file key want <<< "${setting}"
+        key_re="${key//./\\.}"
+        [[ -f "${file}.bak.fixed" ]] || { cp -p "${file}" "${file}.bak.fixed"; log "Backed up ${file} to ${file}.bak.fixed."; }
+        sed -i -E "s|^[[:space:]]*${key_re}[[:space:]]*=.*|${key} = ${want}|" "${file}"
+        log "Fixed ${key} in ${file}."
+    done
 }
 
 kernel_hardening() {
@@ -948,6 +1098,7 @@ kernel_hardening() {
     for setting in "${SYSCTL_SETTINGS[@]}"; do
         set_sysctl_value "${setting%% =*}" "${setting##*= }"
     done
+    fix_sysctl_dropins
     if confirm "Disable IPv6 too? (only if the README doesn't need it)"; then
         set_sysctl_value net.ipv6.conf.all.disable_ipv6 1
         set_sysctl_value net.ipv6.conf.default.disable_ipv6 1
@@ -1076,7 +1227,7 @@ PACKAGE_CANDIDATES=(john john-data hydra hydra-gtk nmap zenmap wireshark wiresha
 service_package() {
     local unit_file
     unit_file=$(systemctl show -p FragmentPath --value "$1" 2>/dev/null)
-    [[ -n "${unit_file}" ]] && dpkg -S "${unit_file}" 2>/dev/null | head -1 | cut -d: -f1
+    { [[ -n "${unit_file}" ]] && pkg_owner "${unit_file}"; } || pkg_owner "/etc/init.d/${1%.service}"
 }
 
 service_found() {
@@ -1104,9 +1255,10 @@ remove_game_item() {
 software_review() {
     header "Applications & Services Review"
     echo "Each item found on this machine is shown with what it does."
-    echo "Check the README: keep critical services and required software, remove the rest."
-    local -a kept=() disabled=() removed=() handled=() games
-    local row name desc unit state pkg choice item type names
+    echo "Check the README: keep critical services and required software (e.g. the required browser)."
+    echo "Removing or stopping something the README requires costs points."
+    local -a kept=() disabled=() removed=() handled=() kept_services=() games
+    local row name desc unit state pkg choice item type names covered
 
     echo ""
     echo "--- Services ---"
@@ -1124,13 +1276,19 @@ software_review() {
             d) disable_service "${unit}"; disabled+=("${name}") ;;
             r)
                 disable_service "${unit}"
-                [[ -n "${pkg}" ]] && apt purge "${pkg}" && log "Purged package ${pkg}."
-                removed+=("${name}")
+                if [[ -n "${pkg}" ]] && apt purge "${pkg}"; then
+                    log "Purged package ${pkg}."
+                    removed+=("${name}")
+                else
+                    echo "    Not uninstalled; ${name} is stopped and disabled."
+                    disabled+=("${name}")
+                fi
                 ;;
             *) mark_kept "${name}" "${pkg}"; kept+=("${name}") ;;
         esac
     done
     ((${#kept[@]} + ${#disabled[@]} + ${#removed[@]} == 0)) && echo "  None of the known services are running or enabled."
+    kept_services=("${kept[@]}")
 
     echo ""
     echo "--- Software ---"
@@ -1138,6 +1296,17 @@ software_review() {
     for pkg in $(find_candidate_packages); do
         printf '%s\n' "${handled[@]}" | grep -qxF -- "${pkg}" && continue
         pkg_installed "${pkg}" || continue
+        # A package that belongs to a service already kept isn't asked about again.
+        covered=0
+        for name in "${kept_services[@]}"; do
+            case "${name}:${pkg}" in
+                "${name}:${name}"* | smbd:samba | nmbd:samba | named:bind9 | nfs-server:nfs-kernel-server) covered=1 ;;
+            esac
+        done
+        if ((covered)); then
+            mark_kept "${pkg}"
+            continue
+        fi
         found=1
         echo ""
         echo "  ${pkg}: $(dpkg-query -W -f='${binary:Summary}' "${pkg}" 2>/dev/null)"
@@ -1195,6 +1364,7 @@ verify_software_review() {
     local row name desc state pkg item bad=0
     for row in "${SERVICE_CANDIDATES[@]}"; do
         IFS='|' read -r name desc <<< "${row}"
+        : "${desc}"
         is_kept "${name}" && continue
         state=$(service_found "${name}.service") && { warn "${name} still ${state}"; bad=1; }
     done
@@ -1236,7 +1406,7 @@ listeners() {
 unowned_scripts() {
     local arg
     for arg in $(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | cut -d' ' -f2-); do
-        [[ -f "${arg}" ]] && ! dpkg -S "$(readlink -f "${arg}")" >/dev/null 2>&1 && readlink -f "${arg}"
+        [[ -f "${arg}" ]] && ! pkg_owner "$(readlink -f "${arg}")" >/dev/null && readlink -f "${arg}"
     done
 }
 
@@ -1244,16 +1414,16 @@ is_suspicious() {
     local pid="$1" comm exe
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
     comm=$(cat "/proc/${pid}/comm" 2>/dev/null)
-    [[ "${comm}" =~ ^(python|perl|ruby|php|nc|ncat|netcat|socat|bash|sh|dash|node|lua) ]] && return 0
+    [[ "${comm}" =~ ^(python[0-9.]*|perl|ruby[0-9.]*|php[0-9.]*|nc|nc\.traditional|nc\.openbsd|ncat|netcat|socat|bash|sh|dash|node|lua[0-9.]*)$ ]] && return 0
     exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
-    [[ -n "${exe}" ]] && ! dpkg -S "${exe}" >/dev/null 2>&1
+    [[ -n "${exe}" && "${exe}" != /snap/* ]] && ! pkg_owner "${exe}" >/dev/null
 }
 
 backdoor_check() {
     header "Backdoor / Listener Check"
     echo "Listening programs. '!!' = script interpreter, netcat, or a program no package installed."
-    local -a rows scripts
-    local i proto port pid cmd mark choice script ref
+    local -a rows scripts terms
+    local i proto port pid cmd mark choice script ref exe base pkg
     mapfile -t rows < <(listeners)
     for i in "${!rows[@]}"; do
         IFS=$'\t' read -r proto port pid <<< "${rows[i]}"
@@ -1283,6 +1453,15 @@ backdoor_check() {
             grep -rlsF "${script}" /etc/systemd /lib/systemd/system /usr/lib/systemd/system /etc/cron* \
                 /var/spool/cron /etc/rc.local /etc/init.d /etc/profile.d 2>/dev/null | sed 's/^/    /'
         done
+        exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
+        base=$(basename "$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | head -1)")
+        terms=("${scripts[@]}")
+        [[ "${base}" =~ ^(nc|ncat|netcat|socat) ]] && terms+=("${base}")
+        # Remove the cron line first, or cron starts the program again a minute later.
+        for script in "${terms[@]}"; do
+            echo "  Cron lines that start ${script}:"
+            review_cron_lines -F "${script}" || echo "    (none)"
+        done
         if confirm "Kill this process?"; then
             if ((${#scripts[@]} > 0)); then
                 for script in "${scripts[@]}"; do
@@ -1302,6 +1481,10 @@ backdoor_check() {
                 confirm "Disable systemd unit $(basename "${ref}")?" && disable_service "$(basename "${ref}")"
             done
         done
+        if pkg=$(pkg_owner "${exe}") && printf '%s\n' "${PACKAGE_CANDIDATES[@]}" | grep -qxF -- "${pkg}" \
+            && ! is_kept "${pkg}" && confirm "Remove the package ${pkg} that provides ${exe}?"; then
+            apt purge "${pkg}" && log "Purged package ${pkg}."
+        fi
     done
 }
 
@@ -1331,12 +1514,13 @@ find_games() {
         if command -v flatpak >/dev/null 2>&1; then
             flatpak list --app --columns=application 2>/dev/null | grep -iE "${regex#^}|game" | sed 's/^/flatpak\t/'
         fi
-        for file in /usr/games/* /usr/local/games/* \
-            $(grep -lsE '^Categories=.*Game' /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop \
-                /home/*/.local/share/applications/*.desktop /home/*/Desktop/*.desktop); do
+        {
+            printf '%s\n' /usr/games/* /usr/local/games/*
+            grep -lsE '^Categories=.*Game' /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop \
+                /home/*/.local/share/applications/*.desktop /home/*/Desktop/*.desktop
+        } | while IFS= read -r file; do
             [[ -e "${file}" ]] || continue
-            pkg=$(dpkg -S "${file}" 2>/dev/null | head -1 | cut -d: -f1)
-            if [[ -n "${pkg}" ]]; then
+            if pkg=$(pkg_owner "${file}"); then
                 echo -e "apt\t${pkg}"
             else
                 echo -e "file\t${file}"
@@ -1421,6 +1605,40 @@ verify_media() {
     ((count == 0)) && pass "No media files found (outside FTP folders)" || warn "${count} media files remain (OK if allowed)"
 }
 
+CRON_SUSPICIOUS='(^|[^a-z])(nc|ncat|netcat|nc\.traditional|nc\.openbsd|socat)([^a-z]|$)|/dev/tcp/|(ba)?sh[[:space:]]+-i|-e[[:space:]]*/bin/|(curl|wget)[^|]*\|[[:space:]]*(ba)?sh|python[0-9.]*[[:space:]]+-c|perl[[:space:]]+-e|base64[[:space:]]+(-d|--decode)|[[:space:]]/(tmp|dev/shm|var/tmp)/'
+
+cron_tables() {
+    local file
+    for file in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/*; do
+        [[ -f "${file}" && "${file}" != *.bak.* ]] && echo "${file}"
+    done
+}
+
+# Shows cron lines matching a pattern (grep -E or -F) and offers to remove each one.
+# Returns 1 when nothing matched.
+review_cron_lines() {
+    local flag="$1" pattern="$2" file hit n i backed found=1
+    local -a hits
+    while IFS= read -r file <&3; do
+        mapfile -t hits < <(grep -n "${flag}" -- "${pattern}" "${file}" | grep -vE '^[0-9]+:[[:space:]]*#')
+        backed=0
+        for ((i = ${#hits[@]} - 1; i >= 0; i--)); do
+            hit="${hits[i]}"
+            n="${hit%%:*}"
+            found=0
+            echo "  !! ${file} line ${n}: ${hit#*:}"
+            if confirm "     Remove this line?"; then
+                if ((backed == 0)); then
+                    cp -p "${file}" "${LOG_FILE%/*}/cron_$(basename "${file}")_$(date +%s).bak"
+                    backed=1
+                fi
+                sed -i "${n}d" "${file}" && log "Removed cron line from ${file}: ${hit#*:}"
+            fi
+        done
+    done 3< <(cron_tables)
+    return "${found}"
+}
+
 cron_review() {
     header "Cron Jobs Review"
     local file user
@@ -1444,6 +1662,11 @@ cron_review() {
     done
 
     echo ""
+    echo "--- Suspicious cron lines (netcat, reverse shells, downloads piped to a shell) ---"
+    review_cron_lines -E "${CRON_SUSPICIOUS}" || echo "  None found."
+    echo "  A program started by a removed line may still be running: see Backdoor / Listener Check."
+
+    echo ""
     echo "--- /etc/rc.local ---"
     grep -vE '^\s*(#|$)' /etc/rc.local 2>/dev/null || echo "  (none)"
     echo "--- /etc/init.d ---"
@@ -1454,8 +1677,14 @@ cron_review() {
 
 verify_cron() {
     local users
+    if cron_tables | xargs -r -d '\n' grep -hE -- "${CRON_SUSPICIOUS}" 2>/dev/null | grep -qvE '^[[:space:]]*#'; then
+        warn "Suspicious cron lines found (run Cron Jobs Review)"
+    else
+        pass "No suspicious cron lines"
+    fi
     users=$(find /var/spool/cron/crontabs -mindepth 1 -maxdepth 1 -printf "%f " 2>/dev/null)
-    [[ -z "${users}" ]] && pass "No user crontabs" || warn "User crontabs exist for: ${users}"
+    [[ -n "${users}" ]] && info "User crontabs exist for: ${users}"
+    return 0
 }
 
 PERM_TARGETS=("/etc/passwd:644:root:root" "/etc/group:644:root:root"
@@ -1494,22 +1723,254 @@ verify_permissions() {
     done
 }
 
-### 7. Malware & Auditing ###
+### 7. Auditing & Malware ###
+
+# Login and sudo messages, from the log file or the systemd journal.
+auth_log() {
+    if [[ -r /var/log/auth.log ]]; then
+        cat /var/log/auth.log.1 /var/log/auth.log 2>/dev/null
+    else
+        journalctl --no-pager -q -o short SYSLOG_FACILITY=4 SYSLOG_FACILITY=10 2>/dev/null
+    fi
+}
+
+save_report() {
+    local file
+    file="${LOG_FILE%/*}/cyberpatriot_$1_$(date +%Y%m%d_%H%M%S).txt"
+    if confirm "Save this report to ${file}?"; then
+        printf '%s\n' "$2" > "${file}" && echo "Saved ${file}."
+    fi
+}
+
+authorized_key_files() {
+    find /root /home -maxdepth 3 -type f -path '*/.ssh/authorized_keys*' -size +0 2>/dev/null
+}
+
+last_login_line() {
+    local user="$1" line
+    if command -v lastlog >/dev/null 2>&1; then
+        line=$(lastlog -u "${user}" 2>/dev/null | tail -n +2)
+    elif command -v lastlog2 >/dev/null 2>&1; then
+        line=$(lastlog2 -u "${user}" 2>/dev/null | tail -n +2)
+    else
+        line=$(last -n 1 "${user}" 2>/dev/null | head -1)
+    fi
+    echo "  ${line:-${user}  (no login recorded)}"
+}
+
+user_activity_report() {
+    local user status changed max file
+    echo "== Logged in right now =="
+    who 2>/dev/null | sed 's/^/  /' | or_none
+    echo ""
+    echo "== Last login for each user =="
+    for user in root $(human_users); do
+        last_login_line "${user}"
+    done
+    echo ""
+    echo "== Most recent logins =="
+    last -n 15 2>/dev/null | head -15 | grep . | grep -v '^wtmp begins' | sed 's/^/  /' | or_none
+    echo ""
+    echo "== Failed logins (count per account) =="
+    auth_log | grep -E 'Failed password|authentication failure' \
+        | grep -oE '(for (invalid user )?|[[:space:]]user=)[A-Za-z0-9._-]+' | awk '{print $NF}' | sed 's/^user=//' \
+        | sort | uniq -c | sort -rn | head -10 | or_none
+    echo ""
+    echo "== Last failed login attempts =="
+    auth_log | grep -E 'Failed password|authentication failure|FAILED LOGIN' | tail -10 | sed 's/^/  /' | or_none
+    echo ""
+    echo "== Commands run with sudo (last 20) =="
+    auth_log | grep -E 'sudo:.*COMMAND=' | tail -20 | sed -E 's/ : .*COMMAND=/ ran: /; s/^/  /' | or_none
+    echo ""
+    echo "== Account and group changes (last 25) =="
+    auth_log | grep -E '(useradd|usermod|userdel|groupadd|groupdel|groupmod|gpasswd|chage|chpasswd|passwd)\[|password changed' \
+        | tail -25 | sed 's/^/  /' | or_none
+    echo ""
+    echo "== When the account files last changed =="
+    stat -c '  %.19y  %n' /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/sudoers 2>/dev/null
+    echo ""
+    echo "== Password status =="
+    printf "  %-18s %-14s %-12s %s\n" "USER" "STATUS" "LAST CHANGE" "MAX DAYS"
+    for user in root $(human_users); do
+        read -r _ status changed _ max _ < <(passwd -S "${user}" 2>/dev/null)
+        case "${status:-}" in
+            P) status="has password" ;;
+            L) status="locked" ;;
+            NP) status="NO PASSWORD" ;;
+        esac
+        [[ "${max:-}" == "99999" ]] && max="never expires"
+        printf "  %-18s %-14s %-12s %s\n" "${user}" "${status:-?}" "${changed:-?}" "${max:-?}"
+    done
+    echo ""
+    echo "== SSH authorized_keys files (key logins that skip the password) =="
+    while IFS= read -r file; do
+        printf "  %s  (%s key(s))\n" "${file}" "$(grep -cvE '^[[:space:]]*(#|$)' "${file}")"
+    done < <(authorized_key_files) | or_none
+}
+
+user_activity_audit() {
+    header "User Activity Audit"
+    local report file owner
+    report=$(user_activity_report 2>&1)
+    echo "${report}"
+    echo ""
+    while IFS= read -r file <&3; do
+        owner=$(basename "$(dirname "$(dirname "${file}")")")
+        echo "  ${file}:"
+        awk '!/^[[:space:]]*(#|$)/ {print "    " $1, $NF}' "${file}"
+        if confirm "  Remove ${file}? (only if the README doesn't need SSH key logins)"; then
+            cp -p "${file}" "${LOG_FILE%/*}/authorized_keys_${owner}_$(date +%s).bak"
+            rm -f -- "${file}" && log "Removed ${file} (backup saved next to the log)."
+        fi
+    done 3< <(authorized_key_files)
+    save_report user_audit "${report}"
+}
+
+verify_user_activity() {
+    local count never
+    count=$(authorized_key_files | grep -c .)
+    ((count == 0)) && pass "No SSH authorized_keys files" || warn "${count} authorized_keys file(s) (fine if the README needs key logins)"
+    never=$(for u in $(human_users); do passwd -S "$u" 2>/dev/null | awk '$5 == 99999 {printf "%s ", $1}'; done)
+    [[ -z "${never}" ]] && pass "All user passwords expire" || warn "Passwords never expire for: ${never}"
+}
+
+extra_hosts() {
+    grep -vE '^[[:space:]]*(#|$)' /etc/hosts 2>/dev/null \
+        | grep -vE '^[[:space:]]*(127\.|::1[[:space:]]|fe00::|ff0[0-9a-f]::)'
+}
+
+system_activity_report() {
+    local exe file
+    echo "== Programs running from unusual folders (/tmp, /var/tmp, /dev/shm, /usr/games) =="
+    ps -eo pid=,user=,args= | grep -E '(^|[[:space:]])/(tmp|var/tmp|dev/shm|usr/games)/' | grep -v 'grep -E' \
+        | cut -c1-150 | sed 's/^/  /' | or_none
+    echo ""
+    echo "== Running programs that no package installed =="
+    while IFS= read -r exe; do
+        [[ "${exe}" == /snap/* ]] && continue
+        if [[ "${exe}" == *" (deleted)" ]]; then
+            echo "  ${exe}"
+        elif [[ -e "${exe}" ]] && ! pkg_owner "${exe}" >/dev/null; then
+            echo "  ${exe}"
+        fi
+    done < <(for file in /proc/[0-9]*; do readlink "${file}/exe" 2>/dev/null; done | sort -u) | or_none
+    echo ""
+    echo "== Packages installed or removed recently (last 30) =="
+    cat /var/log/dpkg.log.1 /var/log/dpkg.log 2>/dev/null | grep -E ' (install|remove|purge) ' | tail -30 \
+        | awk '{print "  " $1, $2, $3, $4}' | or_none
+    echo ""
+    echo "== Files in /etc changed in the last 7 days =="
+    find /etc -xdev -type f -mtime -7 ! -name '*.bak.*' -printf '  %TY-%Tm-%Td %TH:%TM  %p\n' 2>/dev/null \
+        | sort -r | head -40 | or_none
+    echo ""
+    echo "== Startup services and timers that no package installed =="
+    for file in /etc/systemd/system/*.service /etc/systemd/system/*.timer; do
+        [[ -f "${file}" && ! -L "${file}" ]] || continue
+        pkg_owner "${file}" >/dev/null && continue
+        echo "  ${file}"
+        grep -E '^(ExecStart|OnCalendar|OnBootSec)=' "${file}" | sed 's/^/      /'
+    done | or_none
+    echo ""
+    echo "== Boot script /etc/rc.local =="
+    grep -vE '^[[:space:]]*(#|$)|^exit 0' /etc/rc.local 2>/dev/null | sed 's/^/  /' | or_none
+    echo ""
+    echo "== Failed services =="
+    systemctl --failed --no-legend --plain --no-pager 2>/dev/null | awk '{print "  " $1}' | or_none
+    echo ""
+    echo "== Extra /etc/hosts entries (these can redirect websites) =="
+    extra_hosts | sed 's/^/  /' | or_none
+}
+
+system_activity_audit() {
+    header "System Activity Audit"
+    local report
+    report=$(system_activity_report 2>&1)
+    echo "${report}"
+    echo ""
+    echo "Nothing was changed. To act on something: Backdoor / Listener Check and Applications &"
+    echo "Services Review (menu 5), Cron Jobs Review (menu 6), or edit /etc/hosts by hand."
+    save_report system_audit "${report}"
+}
+
+verify_system_activity() {
+    local count
+    count=$(extra_hosts | grep -c .)
+    ((count == 0)) && pass "No extra /etc/hosts entries" || warn "${count} extra /etc/hosts entries (check they are meant to be there)"
+    count=$(systemctl --failed --no-legend --plain --no-pager 2>/dev/null | grep -c .)
+    ((count > 0)) && info "${count} failed service(s)"
+    return 0
+}
+
+AUDIT_RULES="/etc/audit/rules.d/cyberpatriot.rules"
+AUDIT_WATCHES=(
+    "/etc/passwd|identity" "/etc/shadow|identity" "/etc/group|identity" "/etc/gshadow|identity"
+    "/etc/sudoers|sudoers" "/etc/sudoers.d/|sudoers"
+    "/etc/ssh/sshd_config|sshd" "/etc/pam.d/|pam" "/etc/login.defs|login-policy"
+    "/etc/crontab|cron" "/etc/cron.d/|cron" "/var/spool/cron/|cron"
+    "/var/log/lastlog|logins" "/var/log/faillog|logins"
+)
+
+audit_logging() {
+    header "Audit Logging Setup"
+    echo "auditd records who changed important files (accounts, sudo, SSH, PAM, cron)."
+    echo "rsyslog writes logins and sudo use to /var/log/auth.log."
+    local entry path key
+    if ! pkg_installed auditd && confirm "Install auditd?"; then
+        apt install -y auditd && log "Installed auditd."
+    fi
+    if pkg_installed auditd; then
+        if confirm "Add watch rules for account, sudo, SSH, PAM and cron files (${AUDIT_RULES})?"; then
+            mkdir -p "$(dirname "${AUDIT_RULES}")"
+            [[ -f "${AUDIT_RULES}" ]] && backup_file "${AUDIT_RULES}"
+            # A rule for a path that doesn't exist stops the rest from loading, so those are skipped.
+            for entry in "${AUDIT_WATCHES[@]}"; do
+                path="${entry%%|*}"
+                key="${entry##*|}"
+                [[ -e "${path}" ]] && echo "-w ${path} -p wa -k ${key}"
+            done > "${AUDIT_RULES}"
+            log "Wrote audit watch rules to ${AUDIT_RULES}."
+        fi
+        if confirm "Enable and start auditd, and load the rules?"; then
+            systemctl enable --now auditd && log "Enabled auditd."
+            augenrules --load >/dev/null 2>&1 && log "Loaded audit rules."
+            echo "Rules now loaded:"
+            auditctl -l 2>/dev/null | sed 's/^/  /' | or_none
+        fi
+    fi
+
+    echo ""
+    if ! pkg_installed rsyslog && confirm "Install rsyslog (text logs such as /var/log/auth.log)?"; then
+        apt install -y rsyslog && log "Installed rsyslog."
+    fi
+    if pkg_installed rsyslog && ! systemctl is-active --quiet rsyslog 2>/dev/null \
+        && confirm "rsyslog is not running. Enable and start it?"; then
+        systemctl enable --now rsyslog && log "Enabled rsyslog."
+    fi
+
+    echo ""
+    echo "Reading the audit log later:"
+    echo "  ausearch -k identity     changes to passwd / shadow / group"
+    echo "  ausearch -k sudoers      changes to sudo rules"
+    echo "  aureport -au             login attempts"
+}
+
+verify_audit_logging() {
+    systemctl is-active --quiet auditd 2>/dev/null && pass "auditd running" || warn "auditd not running"
+    [[ -s "${AUDIT_RULES}" ]] && pass "Audit watch rules in place" || warn "No audit watch rules (${AUDIT_RULES})"
+    systemctl is-active --quiet rsyslog 2>/dev/null && pass "rsyslog running" || warn "rsyslog not running"
+}
 
 antivirus_audit() {
-    header "Antivirus / Auditing"
+    header "Antivirus / Rootkit Scan"
     if confirm "Install ClamAV and update virus definitions?"; then
         apt install -y clamav clamav-daemon
         systemctl stop clamav-freshclam 2>/dev/null
         freshclam
         systemctl start clamav-freshclam 2>/dev/null
         log "Installed ClamAV and ran freshclam."
-        if confirm "Scan /home now (only reports, nothing deleted)?"; then
-            clamscan -r -i /home | tee -a "${LOG_FILE}"
-        fi
     fi
-    if confirm "Install and enable auditd?"; then
-        apt install -y auditd && systemctl enable --now auditd && log "Enabled auditd."
+    if command -v clamscan >/dev/null 2>&1 && confirm "Scan /home now (only reports, nothing deleted)?"; then
+        clamscan -r -i /home | tee -a "${LOG_FILE}"
     fi
     if confirm "Run a rootkit check with chkrootkit?"; then
         pkg_installed chkrootkit || apt install -y --no-install-recommends chkrootkit
@@ -1518,8 +1979,44 @@ antivirus_audit() {
 }
 
 verify_antivirus() {
-    pkg_installed clamav && pass "ClamAV installed" || warn "ClamAV not installed"
-    systemctl is-active --quiet auditd 2>/dev/null && pass "auditd running" || warn "auditd not running"
+    pkg_installed clamav && info "ClamAV installed" || info "ClamAV not installed (optional)"
+}
+
+security_scanners() {
+    header "Security Scanners"
+    local out
+    echo "Lynis checks the whole system and lists warnings and suggestions. It changes nothing."
+    if confirm "Run Lynis now (installs the lynis package, takes a few minutes)?"; then
+        pkg_installed lynis || apt install -y lynis
+        if command -v lynis >/dev/null 2>&1; then
+            out="${LOG_FILE%/*}/cyberpatriot_lynis_$(date +%Y%m%d_%H%M%S).txt"
+            echo "Running Lynis..."
+            lynis audit system --quick --no-colors > "${out}" 2>&1
+            echo ""
+            echo "Warnings:"
+            grep -E '^warning\[\]=' /var/log/lynis-report.dat 2>/dev/null | cut -d= -f2- \
+                | awk -F'|' '{print "  [" $1 "] " $2}' | or_none
+            echo "Suggestions:"
+            grep -E '^suggestion\[\]=' /var/log/lynis-report.dat 2>/dev/null | cut -d= -f2- \
+                | awk -F'|' '{print "  [" $1 "] " $2}' | or_none
+            echo "Hardening score: $(sed -n 's/^hardening_index=//p' /var/log/lynis-report.dat 2>/dev/null) / 100"
+            echo "Full output saved to ${out}"
+        else
+            echo "Lynis could not be installed."
+        fi
+    fi
+
+    echo ""
+    echo "debsums lists program files that were changed after they were installed (replaced binaries)."
+    if confirm "Run debsums now (installs the debsums package)?"; then
+        pkg_installed debsums || apt install -y debsums
+        if command -v debsums >/dev/null 2>&1; then
+            echo "Changed files:"
+            debsums -c 2>/dev/null | sed 's/^/  /' | or_none
+        else
+            echo "debsums could not be installed."
+        fi
+    fi
 }
 
 ### 8. Forensics Helper (read-only) ###
@@ -1545,16 +2042,16 @@ forensic_find() {
 }
 
 forensic_base64() {
-    header "Base64 Decode"
-    local input
-    read -r -p "Base64 text or a file path: " input
+    header "Decode Text (Base64 / ROT13)"
+    local input text decoded
+    read -r -p "Encoded text or a file path: " input
     [[ -z "${input}" ]] && return
-    if [[ -f "${input}" ]]; then
-        base64 -d < "${input}"
-    else
-        base64 -d <<< "${input}"
-    fi
-    echo ""
+    if [[ -f "${input}" ]]; then text=$(cat "${input}"); else text="${input}"; fi
+    decoded=$(base64 -d <<< "${text}" 2>/dev/null | tr -d '\0')
+    echo "Base64 decoded:      ${decoded:-(not valid Base64)}"
+    echo "ROT13 decoded:       $(tr 'A-Za-z' 'N-ZA-Mn-za-m' <<< "${text}")"
+    [[ -n "${decoded}" ]] && echo "Base64, then ROT13:  $(tr 'A-Za-z' 'N-ZA-Mn-za-m' <<< "${decoded}")"
+    return 0
 }
 
 forensic_hash() {
@@ -1593,7 +2090,7 @@ forensic_recent() {
 ### Menu ###
 
 CATEGORIES=("Users & Groups" "Password & Login Policy" "Updates" "Network & Firewall"
-    "Software & Services" "Files" "Malware & Auditing" "Forensics Helper (read-only)")
+    "Software & Services" "Files" "Auditing & Malware" "Forensics Helper (read-only)")
 CAT_FUNCS=(
     "user_management group_management password_audit sudoers_audit"
     "password_policy account_lockout login_screen"
@@ -1601,7 +2098,7 @@ CAT_FUNCS=(
     "firewall_setup ssh_hardening kernel_hardening ftp_config"
     "software_review backdoor_check"
     "prohibited_media cron_review file_permissions"
-    "antivirus_audit"
+    "user_activity_audit system_activity_audit audit_logging antivirus_audit security_scanners"
     "forensic_ports forensic_find forensic_base64 forensic_hash forensic_lookup forensic_recent"
 )
 declare -A TITLE=(
@@ -1613,9 +2110,11 @@ declare -A TITLE=(
     [kernel_hardening]="Kernel / Network (sysctl)" [ftp_config]="FTP Server (vsftpd)"
     [software_review]="Applications & Services Review" [backdoor_check]="Backdoor / Listener Check"
     [prohibited_media]="Prohibited Media Files" [cron_review]="Cron Jobs Review"
-    [file_permissions]="File Permissions" [antivirus_audit]="Antivirus / Auditing"
+    [file_permissions]="File Permissions" [antivirus_audit]="Antivirus / Rootkit Scan"
+    [user_activity_audit]="User Activity Audit" [system_activity_audit]="System Activity Audit"
+    [audit_logging]="Audit Logging Setup (auditd / rsyslog)" [security_scanners]="Security Scanners (Lynis / debsums)"
     [forensic_ports]="Listening Ports and Processes" [forensic_find]="Find Files"
-    [forensic_base64]="Base64 Decode" [forensic_hash]="File Hashes"
+    [forensic_base64]="Decode Text (Base64 / ROT13)" [forensic_hash]="File Hashes"
     [forensic_lookup]="User / Group Lookup" [forensic_recent]="Recently Modified Files"
 )
 declare -A VERIFY_FN=(
@@ -1628,6 +2127,8 @@ declare -A VERIFY_FN=(
     [software_review]=verify_software_review [backdoor_check]=verify_backdoor
     [prohibited_media]=verify_media [cron_review]=verify_cron
     [file_permissions]=verify_permissions [antivirus_audit]=verify_antivirus
+    [user_activity_audit]=verify_user_activity [system_activity_audit]=verify_system_activity
+    [audit_logging]=verify_audit_logging
 )
 
 verification() {
@@ -1727,7 +2228,9 @@ change_summary() {
 
 main() {
     local choice
+    touch "${LOG_FILE}" 2>/dev/null || LOG_FILE="/var/log/cyberpatriot_hardening.log"
     [[ -f "${LOG_FILE}" ]] && SESSION_START=$(wc -l < "${LOG_FILE}")
+    trap 'echo ""; change_summary; exit 130' INT
     check_os
     log "=== CyberPatriot hardening script started ==="
     echo ""

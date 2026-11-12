@@ -78,9 +78,10 @@ into by anyone.
 ```bash
 sudo passwd -S <user>      # P = has password, NP = NO password, L = locked
 sudo passwd <user>         # set a new, strong password
+sudo passwd -e <user>      # make the user choose a new password at next login
 ```
 
-A strong password has 10+ characters with upper and lower case letters, a
+A strong password has 12+ characters with upper and lower case letters, a
 number and a symbol, e.g. `Cyb3rPatr!0t$`.
 
 ### Sudo rules
@@ -135,13 +136,16 @@ checks passwords. Its settings live in `/etc/pam.d/`.
 sudo nano /etc/pam.d/common-password
 ```
 
-Find the line with `pam_unix.so` and add `minlen=10 remember=5` to the end:
+Find the line with `pam_unix.so` and add `minlen=12 remember=5` to the end:
 
 ```
-password  [success=1 default=ignore]  pam_unix.so obscure yescrypt minlen=10 remember=5
+password  [success=1 default=ignore]  pam_unix.so obscure yescrypt minlen=12 remember=5
 ```
 
-- `minlen=10` means passwords must be at least 10 characters.
+- `minlen=12` means passwords must be at least 12 characters.
+- If the file has a `pam_pwquality.so` line, add `minlen=12` to that line too.
+  (Install it with `sudo apt install libpam-pwquality` if the README asks for
+  complexity rules.)
 - `remember=5` means users can't reuse their last 5 passwords.
 
 **No blank-password logins:**
@@ -490,7 +494,23 @@ Don't delete files from the public FTP folders. Those are work files.
 cat /etc/crontab                  # system schedule
 ls /etc/cron.d /etc/cron.daily    # more scheduled scripts
 sudo crontab -l -u <user>         # one user's scheduled jobs
-sudo crontab -r -u <user>         # delete that user's jobs (if malicious)
+sudo crontab -e -u <user>         # edit one user's jobs (delete just the bad line)
+sudo crontab -r -u <user>         # delete ALL of that user's jobs
+```
+
+Check root too: `sudo crontab -l`. Lines to be suspicious of:
+- anything running `nc`, `netcat` or `ncat` (netcat backdoors), e.g.
+  `* * * * * /usr/bin/nc.traditional -nle /bin/bash -p 1337`
+- `bash -i` or `/dev/tcp/` (reverse shells)
+- `curl ... | sh` or `wget ... | sh` (downloads and runs code)
+- scripts in `/tmp` or `/dev/shm`
+
+Remove the cron line first, then stop the program it started. Otherwise cron
+starts it again a minute later:
+
+```bash
+sudo pkill -f nc.traditional
+sudo apt purge netcat-traditional
 ```
 
 ### File permissions
@@ -511,13 +531,93 @@ sudo chmod 644 /etc/passwd
 
 ---
 
-## 7. Malware & Auditing
+## 7. Auditing & Malware
 
+Auditing means looking at **who did what** on the machine, and setting it up
+so future changes are recorded.
+
+### Who has been using the machine
+```bash
+who                               # who is logged in right now
+last                              # recent logins
+lastlog                           # last login of every account
+sudo lastb                        # failed login attempts
+sudo passwd -S <user>             # password status (P = set, L = locked, NP = none)
+sudo chage -l <user>              # when the password expires
+```
+
+Login and sudo messages are in `/var/log/auth.log`:
+
+```bash
+sudo grep "Failed password" /var/log/auth.log       # failed logins
+sudo grep "COMMAND=" /var/log/auth.log              # every command run with sudo
+sudo grep -E "useradd|usermod|userdel|groupadd|passwd" /var/log/auth.log   # account changes
+```
+
+If that file doesn't exist, use the journal instead: `sudo journalctl | grep sudo`,
+or install the text logger with `sudo apt install rsyslog`.
+
+**SSH keys:** a key in `authorized_keys` lets someone log in without the
+password. A planted key is a back door.
+
+```bash
+sudo ls -la /home/*/.ssh /root/.ssh
+sudo cat /home/<user>/.ssh/authorized_keys
+sudo rm /home/<user>/.ssh/authorized_keys      # only if the README doesn't need key logins
+```
+
+### What has been happening on the machine
+```bash
+ps aux                                      # everything that is running
+ps aux | grep -E "/tmp|/dev/shm"            # programs running from odd folders
+grep " install " /var/log/dpkg.log          # recently installed packages
+sudo find /etc -mtime -7 -type f            # files in /etc changed in the last 7 days
+systemctl --failed                          # services that failed to start
+ls /etc/systemd/system                      # extra startup services
+cat /etc/hosts                              # extra lines here can redirect websites
+```
+
+`/etc/hosts` should normally only have `127.0.0.1 localhost`, the computer's
+own name and a few `ip6-` lines. Delete anything pointing a website at another
+address.
+
+### Recording changes from now on (auditd)
+**What it is:** **auditd** records security events, such as who changed the
+password or sudo files.
+
+```bash
+sudo apt install auditd
+sudo systemctl enable --now auditd
+sudo nano /etc/audit/rules.d/hardening.rules
+```
+
+Add watch rules (`-w` file, `-p wa` = writes and attribute changes, `-k` a
+label to search by):
+
+```
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/sudoers -p wa -k sudoers
+-w /etc/ssh/sshd_config -p wa -k sshd
+```
+
+Load them and read the results:
+
+```bash
+sudo augenrules --load
+sudo auditctl -l                  # show loaded rules
+sudo ausearch -k identity         # who changed the account files
+sudo aureport -au                 # login report
+```
+
+### Scanning tools
 | Tool | What it does |
 |---|---|
 | **ClamAV** | Antivirus scanner |
-| **auditd** | Keeps a log of security events (logins, file changes) |
 | **chkrootkit** | Looks for rootkits: malware that hides itself |
+| **Lynis** | Checks the whole system and lists security warnings and suggestions |
+| **debsums** | Finds program files that were changed after they were installed |
 
 ```bash
 sudo apt install clamav
@@ -525,11 +625,14 @@ sudo systemctl stop clamav-freshclam
 sudo freshclam                    # download the latest virus definitions
 sudo clamscan -r -i /home         # scan home folders, list infected files
 
-sudo apt install auditd
-sudo systemctl enable --now auditd
-
 sudo apt install chkrootkit
 sudo chkrootkit
+
+sudo apt install lynis
+sudo lynis audit system           # read the Warnings and Suggestions at the end
+
+sudo apt install debsums
+sudo debsums -c                   # lists changed files (no output = all fine)
 ```
 
 ---
@@ -542,6 +645,7 @@ sudo chkrootkit
 | Full command line of a process | `ps -ef \| grep <name>` |
 | Find a file | `locate <name>` |
 | Decode base64 text | `echo '<text>' \| base64 -d` |
+| Decode ROT13 text | `echo '<text>' \| tr 'A-Za-z' 'N-ZA-Mn-za-m'` |
 | MD5 hash of a file | `md5sum <file>` |
 | User info / groups | `id <user>` and `getent group <group>` |
 | Recently changed files | `find /home -mtime -7` |
