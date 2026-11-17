@@ -1,152 +1,214 @@
-# Ubuntu / Linux Mint Hardening Reference (Manual)
+# Ubuntu / Linux Mint Hardening Reference
 
-A step-by-step guide to securing an Ubuntu or Linux Mint image by hand.
-Each section explains **what the thing is**, **why it matters**, and gives
-**simple commands** to fix it.
+Every hardening step, done by hand. Each step says **why** in one line, then
+gives commands to copy. Section numbers match the hardening script's menu.
 
-Words in `<angle brackets>` are placeholders. Replace them, e.g. `<user>`
-becomes `jonas`.
+**How to read this sheet**
+- `<user>`, `<group>`, `<service>`, `<file>`: replace with the real name (e.g. `<user>` → `jonas`).
+- **Decide:** check the README before running the command.
+- Editing with nano: **Ctrl+W** search, **Ctrl+O** then **Enter** save, **Ctrl+X** exit.
+- Before editing a system file, back it up: `sudo cp <file> <file>.bak`
 
-**Editing files with nano:** open the file with `sudo nano <file>`, use the
-arrow keys to find the line, change it, then press **Ctrl+O**, **Enter** to
-save and **Ctrl+X** to exit. **Ctrl+W** searches for text.
+> **Golden rules**
+> 1. **Read the README.** Write down the authorized users, the admins, the
+>    critical services and the required software.
+> 2. **Answer the Forensics Questions first.** Fixing things can delete the evidence.
+> 3. **Never stop or remove a critical service or required program.** That costs points.
+> 4. **Keep a second terminal open with `sudo -i`** while editing sudo or PAM
+>    files, so a mistake can't lock you out.
 
-> **Before you start**
-> 1. **Read the README.** It lists the authorized users, the admins, the
->    critical services that must stay running, and the software you must keep.
-> 2. **Answer the Forensics Questions first.** Fixing things can destroy the
->    evidence a question asks about.
-> 3. **Never stop or remove a critical service** from the README (e.g. vsftpd
->    or SSH). That costs points.
+## Contents
+
+- [Start Here: Competition Checklist](#start-here-competition-checklist)
+- [1. Users and Groups](#1-users-and-groups)
+  - [1.1 Users and Admins](#11-users-and-admins)
+  - [1.2 Groups](#12-groups)
+  - [1.3 Passwords](#13-passwords)
+  - [1.4 Sudo Rules](#14-sudo-rules)
+- [2. Password and Login Policy](#2-password-and-login-policy)
+  - [2.1 Password Ages](#21-password-ages)
+  - [2.2 Password Length, History and Blank Passwords](#22-password-length-history-and-blank-passwords)
+  - [2.3 Account Lockout](#23-account-lockout)
+  - [2.4 Login Screen](#24-login-screen)
+- [3. Updates](#3-updates)
+- [4. Network and Firewall](#4-network-and-firewall)
+  - [4.1 Firewall](#41-firewall)
+  - [4.2 SSH](#42-ssh)
+  - [4.3 Kernel Settings (sysctl)](#43-kernel-settings-sysctl)
+  - [4.4 FTP Server (vsftpd)](#44-ftp-server-vsftpd)
+- [5. Software and Services](#5-software-and-services)
+  - [5.1 Services](#51-services)
+  - [5.2 Prohibited Software](#52-prohibited-software)
+  - [5.3 Games](#53-games)
+  - [5.4 Backdoors](#54-backdoors)
+- [6. Files](#6-files)
+  - [6.1 Media Files](#61-media-files)
+  - [6.2 Cron Jobs](#62-cron-jobs)
+  - [6.3 File Permissions](#63-file-permissions)
+- [7. Auditing and Malware](#7-auditing-and-malware)
+  - [7.1 User Activity](#71-user-activity)
+  - [7.2 System Activity](#72-system-activity)
+  - [7.3 Audit Logging (auditd)](#73-audit-logging-auditd)
+  - [7.4 Malware and Security Scans](#74-malware-and-security-scans)
+- [8. Forensics Tips](#8-forensics-tips)
+- [Appendix A: Check Your Work](#appendix-a-check-your-work)
+- [Appendix B: What Services and Tools Are](#appendix-b-what-services-and-tools-are)
+- [Appendix C: What the Kernel Settings Do](#appendix-c-what-the-kernel-settings-do)
 
 ---
 
-## 1. Users & Groups
+## Start Here: Competition Checklist
 
-### Users and administrators
-**What it is:** every person who can log in has an account. Members of the
-`sudo` group are **administrators** and can run any command as root (the
-all-powerful system account).
+Work top to bottom. Each step links to its commands.
 
-**Why it matters:** extra accounts are extra passwords to guess, and extra
-admins are extra ways to take over the whole computer. Compare against the
-README:
-- **Delete** users who aren't listed.
-- **Remove admin rights** from users who aren't listed as admins.
-- **Add** listed users who are missing.
+1. Read the README, answer the Forensics Questions → [8. Forensics](#8-forensics-tips)
+2. Start updates in a **second terminal** (they're slow) → [3. Updates](#3-updates)
+3. Remove unauthorized users, fix admins, create missing users → [1.1](#11-users-and-admins)
+4. Groups the README asks for → [1.2](#12-groups)
+5. Weak, blank and README-flagged passwords; lock root → [1.3](#13-passwords)
+6. Sudo rules (`NOPASSWD`) → [1.4](#14-sudo-rules)
+7. Firewall → [4.1](#41-firewall)
+8. Unneeded services, hacking tools, games → [5.1](#51-services) · [5.2](#52-prohibited-software) · [5.3](#53-games)
+9. Backdoors and cron jobs → [5.4](#54-backdoors) · [6.2](#62-cron-jobs)
+10. Password rules and lockout → [2.1](#21-password-ages) · [2.2](#22-password-length-history-and-blank-passwords) · [2.3](#23-account-lockout)
+11. Harden critical services (SSH, FTP) → [4.2](#42-ssh) · [4.4](#44-ftp-server-vsftpd)
+12. Kernel settings → [4.3](#43-kernel-settings-sysctl)
+13. Media files, file permissions → [6.1](#61-media-files) · [6.3](#63-file-permissions)
+14. Login screen → [2.4](#24-login-screen)
+15. Auditing and scans → [7. Auditing](#7-auditing-and-malware)
+16. Check your work → [Appendix A](#appendix-a-check-your-work)
+
+[↑ Contents](#contents)
+
+---
+
+## 1. Users and Groups
+
+### 1.1 Users and Admins
+**Why:** only README users should exist, and only README admins should have `sudo`.
 
 ```bash
-cat /etc/passwd                     # all accounts (real users usually have UID 1000+)
-getent group sudo                   # who is an admin
+awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd   # human accounts
+getent group sudo adm                                    # who is an admin
+```
+
+**Decide** for each account: admin, standard user, or unauthorized.
+
+```bash
+sudo adduser <user> sudo            # make admin
+sudo adduser <user> adm
+sudo deluser <user> sudo            # remove admin rights
+sudo deluser <user> adm
 sudo deluser --remove-home <user>   # delete an unauthorized user
-sudo gpasswd -d <user> sudo         # take away admin rights
-sudo adduser <user> sudo            # give admin rights
+sudo pkill -KILL -u <user>          # only if delete fails because they're logged in
 sudo adduser <user>                 # create a missing user (asks for a password)
+sudo passwd -e <user>               # must change password at next login
 ```
 
-**Hidden root accounts:** only `root` should have UID `0`, the third field in
-`/etc/passwd`. Look for any other line like `name:x:0:...`.
+Never delete the account you're logged in as. Keep at least one admin.
 
-**Lock root:** nobody should log in as root directly. Admins use `sudo`
-instead.
+**Hidden and misconfigured accounts**
 
 ```bash
-sudo passwd -l root
+awk -F: '$3==0 {print $1}' /etc/passwd                  # UID 0: only root should show
+cut -d: -f3 /etc/passwd | sort | uniq -d                 # duplicate UIDs (should be empty)
+cut -d: -f3 /etc/group  | sort | uniq -d                 # duplicate GIDs (should be empty)
+awk -F: '$3>0 && $3<1000 && $7 ~ /sh$/ {print $1, $7}' /etc/passwd   # system accounts with a shell
+sudo usermod -s /usr/sbin/nologin <account>              # take that shell away
+sudo passwd -l root                                      # lock root (admins use sudo)
 ```
 
-### Groups
-**What it is:** a group is a named set of users. Permissions can be given to
-the whole group at once.
-
-**Why it matters:** READMEs often ask you to create a group and add people to
-it.
+### 1.2 Groups
+**Why:** the README often asks for a group with certain members.
 
 ```bash
-sudo addgroup <group>                 # create a group
-sudo gpasswd -a <user> <group>        # add a user to it
-sudo gpasswd -d <user> <group>        # remove a user from it
-getent group <group>                  # see who's in it
+getent group <group>               # show members
+sudo addgroup <group>              # create
+sudo adduser <user> <group>        # add a member
+sudo deluser <user> <group>        # remove a member
+sudo delgroup <group>              # delete
 ```
 
-### Weak or blank passwords
-**What it is:** password hashes (scrambled passwords) are stored in
-`/etc/shadow`.
-
-**Why it matters:** an account with a blank or easy password can be logged
-into by anyone.
+### 1.3 Passwords
+**Why:** blank, common or short passwords let anyone in.
 
 ```bash
-sudo passwd -S <user>      # P = has password, NP = NO password, L = locked
-sudo passwd <user>         # set a new, strong password
-sudo passwd -e <user>      # make the user choose a new password at next login
+sudo passwd -S -a | awk '$2=="NP"'           # accounts with NO password
+sudo grep -E '^[^:]+:\$1\$' /etc/shadow      # weak MD5 password hashes
+sudo passwd <user>                           # set a new password
+sudo passwd -e <user>                        # force a change at next login
+sudo passwd -l root                          # lock root instead of giving it a password
 ```
 
-A strong password has 12+ characters with upper and lower case letters, a
-number and a symbol, e.g. `Cyb3rPatr!0t$`.
+**Decide:** the README lists each user's password. Change any under 12 characters.
+A strong password has 12+ characters with upper, lower, number and symbol, e.g. `Cyb3rPatr!0t$`.
 
-### Sudo rules
-**What it is:** `/etc/sudoers` (and files in `/etc/sudoers.d/`) control who
-can use `sudo`.
-
-**Why it matters:**
-- `NOPASSWD` lets someone become root **without a password**.
-- `!authenticate` turns password checks off.
+### 1.4 Sudo Rules
+**Why:** `NOPASSWD` and `!authenticate` let someone become root without a password.
 
 ```bash
-sudo visudo                          # ALWAYS edit sudoers with visudo, it checks for mistakes
-ls /etc/sudoers.d                    # also check these files: sudo visudo -f /etc/sudoers.d/<file>
+sudo grep -rn 'NOPASSWD\|!authenticate' /etc/sudoers /etc/sudoers.d/
+sudo visudo                            # edit the main file (checks for mistakes on save)
+sudo visudo -f /etc/sudoers.d/<file>   # edit an extra file
+sudo visudo -c                         # check everything parses
 ```
 
-Find lines containing `NOPASSWD:` and delete that word, so
-`user ALL=(ALL) NOPASSWD: ALL` becomes `user ALL=(ALL) ALL`. Delete any
-`Defaults !authenticate` line.
+Change `ALL=(ALL) NOPASSWD: ALL` → `ALL=(ALL) ALL`. Delete any `Defaults !authenticate` line.
+
+[↑ Contents](#contents)
 
 ---
 
-## 2. Password & Login Policy
+## 2. Password and Login Policy
 
-### Password age rules
-**What it is:** `/etc/login.defs` holds the default password rules for **new**
-accounts.
-
-| Line | Meaning |
-|---|---|
-| `PASS_MAX_DAYS 90` | Must change the password at least every 90 days |
-| `PASS_MIN_DAYS 10` | Can't change it again for 10 days (stops cycling back to an old one) |
-| `PASS_WARN_AGE 7` | Warning 7 days before it expires |
+### 2.1 Password Ages
+**Why:** passwords must expire, and can't be changed back right away.
 
 ```bash
 sudo nano /etc/login.defs
 ```
+```
+PASS_MAX_DAYS   90
+PASS_MIN_DAYS   10
+PASS_WARN_AGE   7
+FAILLOG_ENAB    yes
+LOG_UNKFAIL_ENAB yes
+SYSLOG_SU_ENAB  yes
+SYSLOG_SG_ENAB  yes
+```
 
-Existing users keep their old rules, so set them for each user too:
+`login.defs` only affects new accounts. Apply the ages to existing users too:
 
 ```bash
 sudo chage -M 90 -m 10 -W 7 <user>
-sudo chage -l <user>                  # check it
+sudo chage -l <user>                   # check
 ```
 
-### Password length, history and blank passwords (PAM)
-**What it is:** **PAM** (Pluggable Authentication Modules) is how Linux
-checks passwords. Its settings live in `/etc/pam.d/`.
-
-**Minimum length and remembered passwords:**
+### 2.2 Password Length, History and Blank Passwords
+**Why:** PAM enforces the rules when a password is set or used.
 
 ```bash
 sudo nano /etc/pam.d/common-password
 ```
 
-Find the line with `pam_unix.so` and add `minlen=12 remember=5` to the end:
+Add `minlen=12 remember=5` to the end of the `pam_unix.so` line:
 
 ```
 password  [success=1 default=ignore]  pam_unix.so obscure yescrypt minlen=12 remember=5
 ```
 
-- `minlen=12` means passwords must be at least 12 characters.
-- If the file has a `pam_pwquality.so` line, add `minlen=12` to that line too.
-  (Install it with `sudo apt install libpam-pwquality` if the README asks for
-  complexity rules.)
-- `remember=5` means users can't reuse their last 5 passwords.
+```bash
+sudo touch /etc/security/opasswd && sudo chmod 600 /etc/security/opasswd   # stores old passwords
+```
+
+**Optional complexity rules** (upper, lower, digit, symbol):
+
+```bash
+sudo apt install libpam-pwquality
+sudo nano /etc/pam.d/common-password
+```
+
+Add to the end of the `pam_pwquality.so` line: `minlen=12 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 difok=3`
 
 **No blank-password logins:**
 
@@ -154,21 +216,14 @@ password  [success=1 default=ignore]  pam_unix.so obscure yescrypt minlen=12 rem
 sudo nano /etc/pam.d/common-auth
 ```
 
-On the `pam_unix.so` line, delete the word `nullok`. `nullok` lets accounts
-with an **empty** password log in.
+On the `pam_unix.so` line, delete the word `nullok`.
 
-### Account lockout
-**What it is:** after several wrong passwords, the account gets locked for a
-while.
+### 2.3 Account Lockout
+**Why:** locks an account after repeated wrong passwords (stops brute force).
 
-**Why it matters:** this stops brute-force attacks, where a program tries
-thousands of passwords.
+Create three files with `sudo nano <file>`:
 
-Create three files:
-
-```bash
-sudo nano /usr/share/pam-configs/faillock
-```
+`/usr/share/pam-configs/faillock`
 ```
 Name: Lockout on failed logins
 Default: no
@@ -178,9 +233,7 @@ Auth:
 	[default=die]	pam_faillock.so authfail
 ```
 
-```bash
-sudo nano /usr/share/pam-configs/faillock_reset
-```
+`/usr/share/pam-configs/faillock_reset`
 ```
 Name: Reset lockout on success
 Default: no
@@ -190,9 +243,7 @@ Auth:
 	required	pam_faillock.so authsucc
 ```
 
-```bash
-sudo nano /usr/share/pam-configs/faillock_notify
-```
+`/usr/share/pam-configs/faillock_notify`
 ```
 Name: Notify on account lockout
 Default: no
@@ -202,33 +253,19 @@ Auth:
 	requisite	pam_faillock.so preauth
 ```
 
-Then turn them on:
+Turn them on and set limits:
 
 ```bash
-sudo pam-auth-update
+sudo pam-auth-update --enable faillock faillock_reset faillock_notify
+sudo nano /etc/security/faillock.conf        # set: deny = 5   and   unlock_time = 900
+grep faillock /etc/pam.d/common-auth         # check: 3 lines
+sudo faillock --user <user> --reset          # unlock someone
 ```
 
-Use the arrow keys and Space to tick **Notify on account lockout**, **Reset
-lockout on success** and **Lockout on failed logins**, then select **OK**.
+### 2.4 Login Screen
+**Why:** no guest account, no auto-login, no list of valid usernames.
 
-### Login screen
-**What it is:**
-- **LightDM** is the login screen on Linux Mint.
-- **GDM** is the login screen on Ubuntu with GNOME.
-
-**Why it matters:**
-- A guest account needs no password.
-- Auto-login lets anyone in.
-- Showing the user list gives attackers valid usernames.
-
-LightDM:
-
-```bash
-sudo nano /etc/lightdm/lightdm.conf
-```
-
-Under `[Seat:*]`, add or change these lines:
-
+**LightDM** (Linux Mint): `sudo nano /etc/lightdm/lightdm.conf`, under `[Seat:*]`:
 ```
 allow-guest=false
 greeter-hide-users=true
@@ -236,420 +273,508 @@ greeter-show-manual-login=true
 autologin-user=none
 ```
 
-GDM: in `/etc/gdm3/custom.conf`, under `[daemon]`, set
-`AutomaticLoginEnable=false`.
+**GDM** (Ubuntu): `sudo nano /etc/gdm3/custom.conf`, under `[daemon]`:
+```
+AutomaticLoginEnable=false
+TimedLoginEnable=false
+```
+Then `sudo nano /etc/gdm3/greeter.dconf-defaults`, under `[org/gnome/login-screen]`:
+```
+disable-user-list=true
+disable-restart-buttons=true
+```
+```bash
+sudo dconf update
+```
 
-Changes take effect after a reboot.
+Reboot to apply.
+
+[↑ Contents](#contents)
 
 ---
 
 ## 3. Updates
 
-**Why it matters:** updates fix known security holes. Attackers look for
-computers that haven't installed them.
+**Why:** updates fix known security holes. Start them early: they're slow.
 
 ```bash
-sudo apt update                   # get the list of new versions
-sudo apt full-upgrade -y          # install all updates
-sudo apt install --only-upgrade firefox   # update just one program (e.g. the main browser)
+sudo apt update
+sudo apt full-upgrade -y
+sudo apt install --only-upgrade <package>   # one program, e.g. firefox, chromium, openssh-server, systemd
+sudo snap refresh                           # snap apps (Ubuntu's Firefox is a snap)
 ```
 
-- If apt asks whether to keep a config file, keeping your current version is
-  usually safest.
-- **Automatic updates:**
-  - Linux Mint: Update Manager → Edit → Preferences → Automation, then tick
-    "apply updates automatically".
-  - Ubuntu: Software & Updates → Updates tab, then set "Automatically check
-    for updates: Daily" and "When there are security updates: Download and
-    install automatically".
+If apt asks about a changed config file, keeping the local version is usually safest.
+
+**Automatic updates**
+
+```bash
+sudo apt install unattended-upgrades
+sudo nano /etc/apt/apt.conf.d/20auto-upgrades
+```
+```
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+```
+
+- **Linux Mint:** `sudo mintupdate-automation upgrade enable`, or Update Manager → Edit → Preferences → Automation.
+- **Ubuntu:** Software & Updates → Updates → check *Daily*, security updates *Download and install automatically*.
+- **apt errors about sources:** Mint: open Update Manager and accept its offer to fix the sources / switch mirror. Ubuntu: Software & Updates → Ubuntu Software → *Download from: Main server*.
+
+[↑ Contents](#contents)
 
 ---
 
-## 4. Network & Firewall
+## 4. Network and Firewall
 
-### Firewall (UFW)
-**What it is:** a firewall blocks network connections you didn't allow.
-**UFW** ("Uncomplicated Firewall") is the easy firewall on Ubuntu and Mint.
-
-**Why it matters:** with the firewall on, only services you allow can be
-reached from the network. Allow the ports critical services need **before**
-turning it on.
+### 4.1 Firewall
+**Why:** blocks every incoming connection you didn't allow.
 
 ```bash
-sudo ufw allow ssh           # only if SSH is a critical service
-sudo ufw allow ftp           # only if FTP is a critical service
+sudo apt install ufw                # if missing
+sudo ufw allow ssh                  # Decide: only if SSH is a critical service
+sudo ufw allow ftp                  # Decide: only if FTP is a critical service
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
 sudo ufw enable
 sudo ufw status verbose
 ```
 
-### SSH (remote login)
-**What it is:** **SSH** (`openssh-server`) lets people log in to the computer
-over the network.
+Mint GUI: Control Center → Firewall Configuration → Status on.
 
-**Why it matters:** an SSH server faces the network, so weak settings can let
-an attacker in. If the README doesn't need SSH, remove it with
-`sudo apt purge openssh-server`. If it does need it:
+### 4.2 SSH
+**Why:** SSH faces the network, so weak settings let attackers in.
 
+**Decide:** is SSH (`openssh-server`) a critical service in the README?
+
+Not needed:
 ```bash
-sudo nano /etc/ssh/sshd_config
+sudo systemctl disable --now ssh
+sudo apt purge openssh-server
 ```
 
-| Set this | Why |
-|---|---|
-| `PermitRootLogin no` | Attackers always try root first |
-| `PermitEmptyPasswords no` | No logging in with a blank password |
-| `LoginGraceTime 60` | Disconnect people who don't log in within 60 seconds |
-| `X11Forwarding no` | Don't send graphical apps over SSH |
-| `UsePAM yes` | Use the system's password and lockout rules |
+Needed: `sudo nano /etc/ssh/sshd_config`. Remove any `#` in front and set:
+```
+PermitRootLogin no
+PermitEmptyPasswords no
+LoginGraceTime 60
+MaxAuthTries 4
+X11Forwarding no
+IgnoreRhosts yes
+HostbasedAuthentication no
+PermitUserEnvironment no
+UsePAM yes
+PasswordAuthentication yes
+```
 
-If a line starts with `#`, it's switched off: remove the `#` and set the
-value. Then:
+The **first** value sshd reads wins, and files in `/etc/ssh/sshd_config.d/` are read first.
+Find every copy of a setting (any upper/lower case) and fix them all:
 
 ```bash
-sudo sshd -t                     # check for mistakes (no output = OK)
+sudo grep -rin 'permitrootlogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+sudo sshd -t                                   # check for mistakes (no output = OK)
 sudo systemctl restart ssh
+sudo sshd -T | grep -i permitrootlogin         # the value really in effect
 ```
 
-### Kernel security settings (sysctl)
-**What it is:** settings that change how the Linux core (kernel) behaves.
-They're stored in `/etc/sysctl.conf`.
+### 4.3 Kernel Settings (sysctl)
+**Why:** turns on memory and network protections. What each does: [Appendix C](#appendix-c-what-the-kernel-settings-do).
 
 ```bash
 sudo nano /etc/sysctl.conf
 ```
 
-Change or add these lines. If one exists with a different number, change the
-number.
-
-| Line | What it does |
-|---|---|
-| `kernel.randomize_va_space = 2` | **ASLR**: puts programs at random memory spots so exploits are harder |
-| `net.ipv4.tcp_syncookies = 1` | **SYN cookies**: protects against SYN-flood denial-of-service attacks |
-| `net.ipv4.tcp_rfc1337 = 1` | Ignores fake "reset" packets meant to cut your connections |
-| `net.ipv4.ip_forward = 0` | Don't act as a router |
-| `net.ipv4.conf.all.accept_redirects = 0` | Ignore messages trying to reroute your traffic |
-| `net.ipv4.conf.all.send_redirects = 0` | Don't send reroute messages (only routers should) |
-| `net.ipv4.conf.all.rp_filter = 1` | Drop packets with faked source addresses |
-| `net.ipv4.conf.all.accept_source_route = 0` | Ignore packets that choose their own path |
-| `net.ipv4.conf.all.log_martians = 1` | Log packets with impossible addresses |
-| `net.ipv4.icmp_echo_ignore_broadcasts = 1` | Ignore broadcast pings (Smurf attack) |
-
-Apply them:
-
-```bash
-sudo sysctl --system
-sysctl kernel.randomize_va_space     # check one setting
+Change existing lines or add them at the bottom:
+```
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.tcp_max_syn_backlog = 2048
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_syn_retries = 5
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_rfc1337 = 1
+kernel.randomize_va_space = 2
 ```
 
-### FTP server (vsftpd)
-**What it is:** **FTP** shares files over the network. **vsftpd** is the
-common FTP server. FTP sends passwords as plain readable text.
+**Decide:** only if the README doesn't need IPv6, also add:
+```
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+```
 
-**Why it matters:** if the README says FTP is critical, **don't remove or
-stop it**. Set it up the way the README asks instead.
+Bad values can be planted in other files too. Find and fix them, then apply:
+
+```bash
+sudo grep -rn 'randomize_va_space\|syncookies\|ip_forward' /etc/sysctl.conf /etc/sysctl.d/
+sudo sysctl --system
+sysctl kernel.randomize_va_space net.ipv4.tcp_syncookies net.ipv4.ip_forward   # check
+```
+
+### 4.4 FTP Server (vsftpd)
+**Why:** FTP sends passwords as plain text.
+
+**Decide:** is FTP critical in the README?
+- **Not needed:** `sudo systemctl disable --now vsftpd` and `sudo apt purge vsftpd`
+- **Needed:** configure it, never stop it, and don't delete the files it shares (`/srv/ftp`, `/var/ftp`).
 
 ```bash
 sudo nano /etc/vsftpd.conf
 ```
 
-| Line | Meaning |
-|---|---|
-| `anonymous_enable=YES` / `NO` | Allow logging in as "anonymous" (no real account) |
-| `local_enable=YES` / `NO` | Allow real users to log in (NO keeps their passwords off the network) |
-| `anon_root=/var/ftp` | Folder anonymous users see |
-| `anon_upload_enable=NO` | Anonymous users can't upload |
-| `chroot_local_user=YES` | Real users stay inside their home folder |
-
-Example, "users must log in as anonymous only":
-`anonymous_enable=YES`, `local_enable=NO`, `anon_root=/var/ftp`.
-
-```bash
-sudo systemctl restart vsftpd    # restart (never stop) after editing
+Anonymous logins only:
+```
+anonymous_enable=YES
+local_enable=NO
+anon_root=/var/ftp
+anon_upload_enable=NO
+anon_mkdir_write_enable=NO
 ```
 
-**Don't delete work files in the FTP folders** (`/srv/ftp`, `/var/ftp`).
+Real users only:
+```
+anonymous_enable=NO
+local_enable=YES
+chroot_local_user=YES
+```
+
+```bash
+sudo systemctl restart vsftpd
+systemctl status vsftpd                  # must say active (running)
+```
+
+[↑ Contents](#contents)
 
 ---
 
-## 5. Software & Services
+## 5. Software and Services
 
-### Services
-**What it is:** a service is a program that runs in the background, often
-waiting for network connections.
-
-**Why it matters:** every unneeded service is something an attacker can
-target. Stop and disable services the README doesn't need.
+### 5.1 Services
+**Why:** every running service is something to attack. What each one does: [Appendix B](#appendix-b-what-services-and-tools-are).
 
 ```bash
 systemctl list-units --type=service --state=running   # what's running
-sudo systemctl disable --now <service>                # stop it and keep it off after reboot
-systemctl status <service>                            # check it
+sudo ss -tulnp                                         # what's listening on the network
 ```
 
-**What common services do:**
-
-| Service | What it does | Usually remove? |
-|---|---|---|
-| `nginx`, `apache2` | Web servers (host websites) | Yes, unless the README needs a website |
-| `squid` | Web proxy (passes web traffic through itself) | Yes, it can hide or relay attacks |
-| `dovecot` | Email mailbox server (POP3/IMAP) | Yes on a normal workstation |
-| `postfix`, `sendmail` | Email sending servers | Yes, they can be used to send spam |
-| `smbd`, `nmbd` (Samba) | Windows-style file sharing | Yes, unless file sharing is required |
-| `vsftpd`, `pure-ftpd`, `proftpd` | FTP file servers | **Check the README**: often critical |
-| `tftpd-hpa` | TFTP: file transfer with no password at all | Yes |
-| `telnet`, `xinetd`, `inetd` | Old remote login, no encryption | Yes, use SSH instead |
-| `snmpd` | Network monitoring | Yes, it leaks system information |
-| `nfs-server`, `rpcbind` | Unix file sharing | Yes, unless required |
-| `bind9` | DNS server (turns names into IP addresses) | Yes, unless required |
-| `x11vnc`, `vncserver` | Remote desktop | Yes, often weak passwords |
-| `mysql`, `postgresql` | Databases | Only keep if the README needs them |
-| `cups` | Printing | Usually fine to leave |
-| `avahi-daemon` | Announces the computer on the local network | Can be disabled |
-
-### Backdoors (hidden listening programs)
-**What it is:** a backdoor is a hidden program that lets an attacker connect
-in. Often it's a Python, Perl or netcat script listening on an odd port like
-1337.
+**Decide** for each: keep (critical), disable, or remove.
 
 ```bash
-sudo ss -tlnp                # listening ports and the program behind each
-ps -ef | grep python         # see the full command and file path
-sudo pkill -f <script-name>  # stop it, e.g. sudo pkill -f kneelB4zod.py
-sudo rm <path-to-script>     # delete it
+sudo systemctl disable --now <service>                 # stop now and at boot
+dpkg -S /lib/systemd/system/<service>.service          # which package installed it
+sudo apt purge <package>                               # uninstall it
 ```
 
-If it comes back, check what starts it:
+### 5.2 Prohibited Software
+**Why:** hacking tools and unneeded servers are scored as prohibited. Desktop icons show what's installed.
 
 ```bash
-ls /etc/systemd/system
-sudo crontab -l
-ls /etc/cron.d
+apt list --installed 2>/dev/null | grep -E 'john|hydra|nmap|zenmap|wireshark|tshark|ophcrack|aircrack|ettercap|kismet|nikto|sqlmap|medusa|hashcat|fcrackzip|doona|xprobe|netcat|ncat|deluge|transmission|qbittorrent'
+sudo apt purge <package>             # e.g. sudo apt purge 'wireshark*'
+sudo apt autoremove
 ```
 
-### Prohibited software
-**Why it matters:** hacking tools and unneeded programs count as prohibited
-software. Remove anything the README doesn't allow.
+**Decide:** some images require a tool (e.g. Wireshark). `netcat-openbsd` is part of normal Ubuntu.
+
+### 5.3 Games
+**Why:** games are non-work software the README forbids.
 
 ```bash
-apt list --installed | grep <name>    # is it installed?
-sudo apt purge <package>              # remove it and its settings
-sudo apt autoremove                   # clean up leftovers
+dpkg-query -W -f='${Section} ${Package}\n' | grep games    # game packages
+ls /usr/games /usr/local/games                             # game programs and loose files
+grep -l 'Categories=.*Game' /usr/share/applications/*.desktop
+snap list
+flatpak list
+```
+```bash
+sudo apt purge <game>            # e.g. aisleriot gnome-mines zangband
+sudo snap remove <game>
+sudo flatpak uninstall <app-id>
+sudo rm '<file>'                 # loose files, e.g. a zip in /usr/games
 ```
 
-**What common tools are:**
+### 5.4 Backdoors
+**Why:** a hidden program listening on a port lets attackers in.
 
-| Program | What it does |
-|---|---|
-| `john`, `hashcat`, `ophcrack`, `fcrackzip` | Password crackers |
-| `hydra`, `medusa` | Guess logins over the network (brute force) |
-| `doona` | Fuzzer: sends junk data to crash programs |
-| `nmap`, `zenmap`, `xprobe` | Network scanners: find computers and open ports |
-| `wireshark`, `tshark` | Capture network traffic (may be needed for a forensics question; remove after if prohibited) |
-| `netcat` / `nc` | Raw network connections, often used as a backdoor |
-| `aircrack-ng`, `kismet` | Wi-Fi cracking |
-| `ettercap` | Intercepts other people's traffic (man-in-the-middle) |
-| `nikto`, `sqlmap` | Website attack tools |
-| `deluge`, `transmission`, `qbittorrent` | BitTorrent (piracy) |
+**Find it:**
+```bash
+sudo ss -tlnp                         # odd ports (1337, 4444, 31337) or python/perl/nc programs
+ps -ef | grep -E 'python|perl|nc|ncat|socat'
+sudo ls -l /proc/<pid>/exe            # the real program file
+dpkg -S <file>                        # "no path found" = not from a package
+```
 
-Also check for downloaded tools sitting as files, e.g. a `.zip` in
-`/usr/games`:
+**Answer any Forensics Question about it first** (e.g. its folder), then remove it **in this order**:
 
 ```bash
-locate '*.zip'
-sudo rm <file>
+sudo crontab -l                                          # 1. find what restarts it ...
+sudo grep -rln '<name>' /etc/cron* /var/spool/cron /etc/systemd/system /etc/rc.local
+sudo crontab -e                                          #    ... and delete that line
+sudo systemctl disable --now <unit>                      #    (if a systemd unit starts it)
+sudo pkill -f <name>                                     # 2. stop it
+sudo rm <script>                                         # 3. delete the script
+sudo apt purge <package>                                 # 4. remove the tool, e.g. netcat-traditional
 ```
 
-### Games
-Games aren't work-related and are usually prohibited.
-
-```bash
-ls /usr/games                     # game programs
-apt list --installed | grep -i game
-sudo apt purge <game>             # e.g. aisleriot, gnome-mines, gnome-sudoku
-```
+[↑ Contents](#contents)
 
 ---
 
 ## 6. Files
 
-### Prohibited media
-Music and video files (`.mp3`, `.mp4`, `.ogg`, `.wav`, `.avi`, `.mkv`…) are
-"non-work-related media" in most READMEs.
+### 6.1 Media Files
+**Why:** the README usually bans non-work media (music, video).
 
 ```bash
-sudo updatedb                     # refresh the file database
-locate '*.mp3'
-locate '*.ogg'
-sudo rm <file>
+sudo updatedb
+locate -i '*.mp3'                     # repeat for: mp4 ogg wav flac avi mkv mov m4a wma aac webm mpg
+sudo find /home /root /tmp /srv /opt /media /mnt -type f \( -iname '*.mp3' -o -iname '*.mp4' -o -iname '*.ogg' -o -iname '*.wav' -o -iname '*.flac' -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' \) -not -path '*/ftp/*'
+sudo rm '<file>'
 ```
 
-Don't delete files from the public FTP folders. Those are work files.
+**Don't delete:** files in FTP shares (`/srv/ftp`, `/var/ftp`) or system sounds under `/usr`.
 
-### Scheduled tasks (cron)
-**What it is:** **cron** runs commands on a schedule.
-
-**Why it matters:** attackers use it to restart backdoors.
+### 6.2 Cron Jobs
+**Why:** attackers use cron to restart backdoors every minute.
 
 ```bash
-cat /etc/crontab                  # system schedule
-ls /etc/cron.d /etc/cron.daily    # more scheduled scripts
-sudo crontab -l -u <user>         # one user's scheduled jobs
-sudo crontab -e -u <user>         # edit one user's jobs (delete just the bad line)
-sudo crontab -r -u <user>         # delete ALL of that user's jobs
+cat /etc/crontab
+ls /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly
+sudo ls /var/spool/cron/crontabs                 # users with their own crontab
+sudo crontab -l -u <user>                        # show (root: sudo crontab -l)
+sudo crontab -e -u <user>                        # edit: delete just the bad line
+cat /etc/rc.local                                # runs at boot
 ```
 
-Check root too: `sudo crontab -l`. Lines to be suspicious of:
-- anything running `nc`, `netcat` or `ncat` (netcat backdoors), e.g.
-  `* * * * * /usr/bin/nc.traditional -nle /bin/bash -p 1337`
-- `bash -i` or `/dev/tcp/` (reverse shells)
-- `curl ... | sh` or `wget ... | sh` (downloads and runs code)
-- scripts in `/tmp` or `/dev/shm`
+**Red flags:** `nc`, `ncat`, `netcat`, `socat`, `bash -i`, `/dev/tcp/`, `curl … | sh`, `wget … | sh`, `python -c`, `base64 -d`, scripts in `/tmp` or `/dev/shm`.
 
-Remove the cron line first, then stop the program it started. Otherwise cron
-starts it again a minute later:
+### 6.3 File Permissions
+**Why:** password hashes and sudo rules must not be readable or writable by everyone.
 
-```bash
-sudo pkill -f nc.traditional
-sudo apt purge netcat-traditional
-```
-
-### File permissions
-Permission numbers are read as owner / group / everyone: 6 = read+write,
-4 = read, 0 = nothing.
-
-| File | Should be | Why |
+| File | Should be | Fix |
 |---|---|---|
-| `/etc/shadow` | `640` | Holds password hashes; regular users must not read it |
-| `/etc/passwd`, `/etc/group` | `644` | Everyone may read; only root may change |
-| `/etc/sudoers` | `440` | Read-only |
+| `/etc/passwd`, `/etc/group` | `644 root:root` | `sudo chmod 644 <file>` |
+| `/etc/shadow`, `/etc/gshadow` | `640 root:shadow` | `sudo chmod 640 <file> && sudo chown root:shadow <file>` |
+| `/etc/sudoers` | `440 root:root` | `sudo chmod 440 /etc/sudoers` |
 
 ```bash
-ls -l /etc/shadow                 # -rw-r----- means 640
-sudo chmod 640 /etc/shadow
-sudo chmod 644 /etc/passwd
+stat -c '%a %U:%G %n' /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers
+sudo find /etc -type f -perm -0002                                   # world-writable (should be none)
+sudo find / -xdev -type f -perm -4000 2>/dev/null | grep -vE '^/(usr/)?(s?bin|lib)'   # odd SUID programs
 ```
+
+[↑ Contents](#contents)
 
 ---
 
-## 7. Auditing & Malware
+## 7. Auditing and Malware
 
-Auditing means looking at **who did what** on the machine, and setting it up
-so future changes are recorded.
+### 7.1 User Activity
+**Why:** shows who logged in, failed, used sudo, or changed accounts.
 
-### Who has been using the machine
 ```bash
-who                               # who is logged in right now
-last                              # recent logins
-lastlog                           # last login of every account
-sudo lastb                        # failed login attempts
-sudo passwd -S <user>             # password status (P = set, L = locked, NP = none)
-sudo chage -l <user>              # when the password expires
+who                                       # logged in now
+last                                      # recent logins
+lastlog                                   # last login of every account
+sudo lastb                                # failed logins
+sudo passwd -S -a                         # password status: P set, L locked, NP none
+sudo grep 'Failed password' /var/log/auth.log
+sudo grep 'COMMAND=' /var/log/auth.log    # every sudo command
+sudo grep -E 'useradd|usermod|userdel|groupadd|passwd' /var/log/auth.log
+ls -l /etc/passwd /etc/shadow /etc/group /etc/sudoers   # when they last changed
 ```
 
-Login and sudo messages are in `/var/log/auth.log`:
+No `/var/log/auth.log`? Use `sudo journalctl | grep sudo`, or install it: `sudo apt install rsyslog`.
+
+**SSH keys** log in without a password. A planted key is a back door:
 
 ```bash
-sudo grep "Failed password" /var/log/auth.log       # failed logins
-sudo grep "COMMAND=" /var/log/auth.log              # every command run with sudo
-sudo grep -E "useradd|usermod|userdel|groupadd|passwd" /var/log/auth.log   # account changes
-```
-
-If that file doesn't exist, use the journal instead: `sudo journalctl | grep sudo`,
-or install the text logger with `sudo apt install rsyslog`.
-
-**SSH keys:** a key in `authorized_keys` lets someone log in without the
-password. A planted key is a back door.
-
-```bash
-sudo ls -la /home/*/.ssh /root/.ssh
+sudo ls -la /root/.ssh /home/*/.ssh
 sudo cat /home/<user>/.ssh/authorized_keys
-sudo rm /home/<user>/.ssh/authorized_keys      # only if the README doesn't need key logins
+sudo rm /home/<user>/.ssh/authorized_keys         # Decide: only if the README doesn't need key logins
 ```
 
-### What has been happening on the machine
+### 7.2 System Activity
+**Why:** spots planted programs, packages, startup services and redirected websites.
+
 ```bash
-ps aux                                      # everything that is running
-ps aux | grep -E "/tmp|/dev/shm"            # programs running from odd folders
-grep " install " /var/log/dpkg.log          # recently installed packages
-sudo find /etc -mtime -7 -type f            # files in /etc changed in the last 7 days
-systemctl --failed                          # services that failed to start
-ls /etc/systemd/system                      # extra startup services
-cat /etc/hosts                              # extra lines here can redirect websites
+ps aux | grep -E '/tmp|/dev/shm|/usr/games'      # programs running from odd folders
+grep -E ' install | remove ' /var/log/dpkg.log   # recent package changes
+sudo find /etc -type f -mtime -7                  # /etc files changed in 7 days
+ls -l /etc/systemd/system                         # extra startup services
+systemctl --failed                                # broken services
+cat /etc/hosts                                    # should only be localhost lines + this PC's name
 ```
 
-`/etc/hosts` should normally only have `127.0.0.1 localhost`, the computer's
-own name and a few `ip6-` lines. Delete anything pointing a website at another
-address.
-
-### Recording changes from now on (auditd)
-**What it is:** **auditd** records security events, such as who changed the
-password or sudo files.
+### 7.3 Audit Logging (auditd)
+**Why:** records who changes account, sudo, SSH, PAM and cron files from now on.
 
 ```bash
 sudo apt install auditd
-sudo systemctl enable --now auditd
 sudo nano /etc/audit/rules.d/hardening.rules
 ```
-
-Add watch rules (`-w` file, `-p wa` = writes and attribute changes, `-k` a
-label to search by):
-
 ```
 -w /etc/passwd -p wa -k identity
 -w /etc/shadow -p wa -k identity
 -w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
 -w /etc/sudoers -p wa -k sudoers
+-w /etc/sudoers.d/ -p wa -k sudoers
 -w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/pam.d/ -p wa -k pam
+-w /etc/login.defs -p wa -k login-policy
+-w /etc/crontab -p wa -k cron
+-w /etc/cron.d/ -p wa -k cron
+-w /var/spool/cron/ -p wa -k cron
+-w /var/log/lastlog -p wa -k logins
+-w /var/log/faillog -p wa -k logins
 ```
-
-Load them and read the results:
-
 ```bash
+sudo systemctl enable --now auditd
 sudo augenrules --load
-sudo auditctl -l                  # show loaded rules
+sudo auditctl -l                  # rules loaded
 sudo ausearch -k identity         # who changed the account files
 sudo aureport -au                 # login report
+sudo apt install rsyslog && sudo systemctl enable --now rsyslog   # text logs (auth.log)
 ```
 
-### Scanning tools
-| Tool | What it does |
+### 7.4 Malware and Security Scans
+
+| Tool | Finds |
 |---|---|
-| **ClamAV** | Antivirus scanner |
-| **chkrootkit** | Looks for rootkits: malware that hides itself |
-| **Lynis** | Checks the whole system and lists security warnings and suggestions |
-| **debsums** | Finds program files that were changed after they were installed |
+| ClamAV | Viruses |
+| chkrootkit | Rootkits (malware that hides itself) |
+| Lynis | Weak settings across the whole system |
+| debsums | Program files changed after install (replaced binaries) |
 
 ```bash
-sudo apt install clamav
-sudo systemctl stop clamav-freshclam
-sudo freshclam                    # download the latest virus definitions
-sudo clamscan -r -i /home         # scan home folders, list infected files
-
-sudo apt install chkrootkit
-sudo chkrootkit
-
-sudo apt install lynis
-sudo lynis audit system           # read the Warnings and Suggestions at the end
-
-sudo apt install debsums
-sudo debsums -c                   # lists changed files (no output = all fine)
+sudo apt install clamav && sudo systemctl stop clamav-freshclam && sudo freshclam
+sudo clamscan -r -i /home
+sudo apt install chkrootkit && sudo chkrootkit
+sudo apt install lynis && sudo lynis audit system      # read Warnings and Suggestions at the end
+sudo apt install debsums && sudo debsums -c             # no output = nothing changed
 ```
+
+[↑ Contents](#contents)
 
 ---
 
-## 8. Forensics Question Tips
+## 8. Forensics Tips
 
 | Task | Command |
 |---|---|
-| Which program is listening on a port | `sudo ss -tlnp` |
+| Program listening on a port | `sudo ss -tlnp` |
 | Full command line of a process | `ps -ef \| grep <name>` |
-| Find a file | `locate <name>` |
-| Decode base64 text | `echo '<text>' \| base64 -d` |
-| Decode ROT13 text | `echo '<text>' \| tr 'A-Za-z' 'N-ZA-Mn-za-m'` |
-| MD5 hash of a file | `md5sum <file>` |
-| User info / groups | `id <user>` and `getent group <group>` |
-| Recently changed files | `find /home -mtime -7` |
+| Find a file | `sudo updatedb && locate <name>` |
+| Decode Base64 | `echo '<text>' \| base64 -d` |
+| Decode ROT13 | `echo '<text>' \| tr 'A-Za-z' 'N-ZA-Mn-za-m'` |
+| Hash a file | `md5sum <file>` · `sha256sum <file>` |
+| User's groups and details | `id <user>` · `sudo chage -l <user>` |
+| Group members | `getent group <group>` |
+| Recently changed files | `find /home -type f -mtime -7` |
 | Read a network capture | `tshark -r <file.pcap>` |
-| Extract data hidden in an image | `steghide extract -sf <image>` |
+| Follow a TCP stream | `tshark -q -z follow,tcp,ascii,<n> -r <file.pcap>` |
+| Extract data hidden in an image | `steghide extract -sf <image> -p <passphrase>` |
 
-Remember to **save** the Forensics Question file after typing the answer.
+Type the answer in the Forensics Question file and **save** it.
+
+[↑ Contents](#contents)
+
+---
+
+## Appendix A: Check Your Work
+
+```bash
+getent group sudo                                        # admins match the README
+sudo passwd -S -a | awk '$2=="NP"'                       # empty = no blank passwords
+grep -E '^PASS_(MAX|MIN|WARN)' /etc/login.defs
+grep pam_unix /etc/pam.d/common-password                 # minlen=12 remember=5
+grep -c nullok /etc/pam.d/common-auth                    # 0
+grep -c faillock /etc/pam.d/common-auth                  # 3
+sudo grep -rn NOPASSWD /etc/sudoers /etc/sudoers.d/      # nothing
+sudo ufw status                                          # active
+sudo sshd -T | grep -Ei '^(permitrootlogin|permitemptypasswords|x11forwarding) '
+sysctl kernel.randomize_va_space net.ipv4.tcp_syncookies net.ipv4.ip_forward net.ipv4.tcp_rfc1337
+apt list --upgradable                                    # empty
+cat /etc/apt/apt.conf.d/20auto-upgrades
+stat -c '%a %n' /etc/shadow /etc/passwd /etc/sudoers     # 640 644 440
+systemctl is-active <critical-service>                   # active, for every README service
+```
+
+[↑ Contents](#contents)
+
+---
+
+## Appendix B: What Services and Tools Are
+
+**Services**
+
+| Service | What it does | Usually |
+|---|---|---|
+| `nginx`, `apache2` | Web server | Remove unless the README needs a website |
+| `squid` | Web proxy | Remove |
+| `dovecot` | Email mailbox server (POP3/IMAP) | Remove |
+| `postfix`, `sendmail`, `exim4` | Email sending server | Remove |
+| `smbd`, `nmbd` (Samba) | Windows-style file sharing | Remove unless required |
+| `vsftpd`, `pure-ftpd`, `proftpd` | FTP server | **Check README**, often critical |
+| `tftpd-hpa`, `atftpd` | File transfer with no password | Remove |
+| `telnet`, `inetd`, `xinetd` | Unencrypted remote login | Remove |
+| `ssh` | Encrypted remote login | **Check README**, often critical |
+| `snmpd` | Network monitoring, leaks system info | Remove |
+| `nfs-server`, `rpcbind` | Unix file sharing | Remove unless required |
+| `bind9` / `named` | DNS server | Remove unless required |
+| `x11vnc`, `vncserver` | Remote desktop | Remove |
+| `mysql`, `mariadb`, `postgresql` | Database | Keep only if required |
+| `openvpn` | VPN tunnel | Remove unless required |
+| `rsync` | File sync daemon | Remove unless required |
+| `cups` | Printing | Usually fine |
+| `avahi-daemon` | Announces the PC on the network | Can disable |
+
+**Tools**
+
+| Package | What it is |
+|---|---|
+| `john`, `hashcat`, `ophcrack`, `fcrackzip` | Password crackers |
+| `hydra`, `medusa` | Brute-force login attackers |
+| `doona` | Fuzzer (sends junk to crash programs) |
+| `nmap`, `zenmap`, `xprobe` | Network and port scanners |
+| `wireshark`, `tshark` | Network traffic capture |
+| `netcat`, `ncat`, `socat` | Raw network connections, common backdoor |
+| `aircrack-ng`, `kismet` | Wi-Fi cracking |
+| `ettercap` | Man-in-the-middle attacks |
+| `nikto`, `sqlmap` | Website attack tools |
+| `deluge`, `transmission`, `qbittorrent` | BitTorrent clients |
+
+[↑ Contents](#contents)
+
+---
+
+## Appendix C: What the Kernel Settings Do
+
+| Setting | Effect |
+|---|---|
+| `kernel.randomize_va_space = 2` | **ASLR**: random memory layout, makes exploits harder |
+| `net.ipv4.tcp_syncookies = 1` | **SYN cookies**: survive SYN-flood attacks |
+| `net.ipv4.tcp_rfc1337 = 1` | Ignore fake "reset" packets (TIME-WAIT assassination) |
+| `net.ipv4.ip_forward = 0` | Don't act as a router |
+| `*.accept_redirects = 0`, `secure_redirects = 0` | Ignore messages that reroute your traffic |
+| `*.send_redirects = 0` | Don't send reroute messages |
+| `*.rp_filter = 1` | Drop packets with faked source addresses |
+| `accept_source_route = 0` | Ignore packets that pick their own route |
+| `log_martians = 1` | Log packets with impossible addresses |
+| `icmp_echo_ignore_broadcasts = 1` | Ignore broadcast pings (Smurf attack) |
+| `tcp_max_syn_backlog`, `tcp_synack_retries`, `tcp_syn_retries` | More SYN-flood resistance |
+| `net.ipv6.conf.*.disable_ipv6 = 1` | Turn off IPv6 (only if not needed) |
+
+[↑ Contents](#contents)
